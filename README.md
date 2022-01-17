@@ -1,0 +1,1 @@
+# shng-sonos-http-plugin
