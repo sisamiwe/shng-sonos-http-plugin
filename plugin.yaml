@@ -1,0 +1,64 @@
+# Metadata for the plugin
+plugin:
+    # Global plugin attributes
+    type: interface                 # plugin type (gateway, interface, protocol, system, web)
+    description:
+        de: ''
+        en: ''
+    maintainer: sisamiwe
+#    tester:                         # Who tests this plugin?
+    state: develop                   # change to ready when done with development
+#    keywords: iot xyz
+#    documentation: https://github.com/smarthomeNG/smarthome/wiki/CLI-Plugin        # url of documentation (wiki) page
+#    support: https://knx-user-forum.de/forum/supportforen/smarthome-py
+
+    version: 1.0.0                  # Plugin version (must match the version specified in __init__.py)
+    sh_minversion: 1.8              # minimum shNG version to use this plugin
+#    sh_maxversion:                 # maximum shNG version to use this plugin (leave empty if latest)
+    py_minversion: 3.8              # minimum Python version to use for this plugin
+#    py_maxversion:                 # maximum Python version to use for this plugin (leave empty if latest)
+    multi_instance: false           # plugin supports multi instance
+    restartable: unknown
+    classname: SonosHttp            # class containing the plugin
+
+parameters:
+
+    Server_IP:
+        type: ipv4
+        mandatory: false
+        default: '0.0.0.0'
+        description:
+            de: 'IP-Adresse des Servers'
+            en: 'IP-Address of the server'
+
+    Server_Port:
+        type: int
+        mandatory: false
+        default: 1025
+        description:
+            de: 'Port des Servers'
+            en: 'Port of the server'
+
+item_attributes:
+    sonos_room:
+        type: str
+        description:
+            de: ''
+            en: ''
+
+    sonos_cmd:
+        type: str
+        description:
+            de: ''
+            en: ''
+
+item_structs: NONE
+
+#item_attribute_prefixes:
+    # Definition of item attributes that only have a common prefix (enter 'item_attribute_prefixes: NONE' or ommit this section, if section should be empty)
+    # NOTE: This section should only be used, if really nessesary (e.g. for the stateengine plugin)
+
+plugin_functions: NONE
+
+logic_parameters: NONE
+
