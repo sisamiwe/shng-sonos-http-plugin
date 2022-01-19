@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 # vim: set encoding=utf-8 tabstop=4 softtabstop=4 shiftwidth=4 expandtab
 #########################################################################
-#  Copyright 2022-             Michael Wenzel       wenzel_michael@web.de
+#  Copyright 2020-      <AUTHOR>                                  <EMAIL>
 #########################################################################
 #  This file is part of SmartHomeNG.
 #  https://www.smarthomeNG.de
 #  https://knx-user-forum.de/forum/supportforen/smarthome-py
 #
-#  Plugin to connect to Sonos-HTTP-API to run with SmartHomeNG version 1.8 
-#  and upwards.
+#  Sample plugin for new plugins to run with SmartHomeNG version 1.8 and
+#  upwards.
 #
 #  SmartHomeNG is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -38,8 +38,49 @@ import urllib.parse as urlparse
 import logging
 import requests
 import json
-import socket
-# from deepdiff import DeepDiff
+
+cmds = ['play',
+        'pause',
+        'playpause',
+        'volume',
+        'groupVolume',
+        'mute',
+        'unmute',
+        'groupMute',
+        'groupUnmute',
+        'togglemute',
+        'trackseek',
+        'timeseek',
+        'next',
+        'previous',
+        'state',
+        'favorite',
+        'favorites',
+        'playlist',
+        'lockvolumes',
+        'unlockvolumes',
+        'repeat',
+        'shuffle',
+        'crossfade',
+        'pauseall',
+        'resumeall',
+        'say',
+        'sayall',
+        'saypreset',
+        'queue',
+        'clearqueue',
+        'sleep',
+        'linein',
+        'clip',
+        'clipall',
+        'clippreset',
+        'join',
+        'leave',
+        'sub',
+        'nightmode',
+        'speechenhancement',
+        'bass',
+        'treble']
 
 
 class SonosHttp(SmartPlugin):
@@ -63,64 +104,44 @@ class SonosHttp(SmartPlugin):
         super().__init__()
 
         # get the parameters for the plugin (as defined in metadata plugin.yaml):
-        self._sonos_http_api_host = self.get_parameter_value('Sonos_HTTP_API_Host') if self.get_parameter_value('Sonos_HTTP_API_Host') != '127.0.0.1' else Utils.get_local_ipv4_address()
-        self._sonos_http_api_port = self.get_parameter_value('Sonos_HTTP_API_Port') if is_valid_port(self.get_parameter_value('Sonos_HTTP_API_Port')) else None
-
-        if not self._sonos_http_api_host or not self._sonos_http_api_port:
-            self.logger.error(f"Settings for Sonos-HTTP-API-Host incorrect. Plugin will not be started.")
-            self._init_complete = False
-                    
-        self._http_server_ip = self.get_parameter_value('Server_IP') if self.get_parameter_value('Server_IP') != '127.0.0.1' else Utils.get_local_ipv4_address()
-        _http_server_port = self.get_parameter_value('Server_Port')
-        if is_valid_port(_http_server_port):
-            if is_open_port(_http_server_port):
-                self._http_server_port = int(_http_server_port)
-            else:
-                self.logger.error(f"Your chosen webservice port {_http_server_port} is already in use.")
+        self._http_server_ip = self.get_parameter_value('Server_IP') if self.get_parameter_value('Server_IP') != '0.0.0.0' else Utils.get_local_ipv4_address()
+        self._http_server_port = self.get_parameter_value('Server_Port')
 
         # define properties
-        self._item_dict = {}                        # dict to hold all items {item1: ('sonos_zone', 'sonos_cmd'), item2: ('sonos_zone', 'sonos_cmd')...}
-        self.sonos = {}                             # dict to hold state information per zone
-        self.sonos_zone_uuid = set()                # set of tuples for [(zone1, uuid1), (zone2, uuid2), ...]
-        self.sonos_topology = {}                    # dict for topology {uuid1 {'coordinator': 'RINCON_******', 'members': {'RINCON_******'}}, uuid2....
-        self.sonos_favorites = []
-        self.sonos_playlists = []
+        self._item_dict = {}                        # dict to hold all items {item1: ('sonos_room', 'sonos_cmd'), item2: ('sonos_room', 'sonos_cmd')...}
+        self.sonos = {}                             # dict to hold state information per room
+        self.sonos_room_uuid = set()                # set of tuples for [(room1, uuid1), (room2, uuid2), ...]
+        self.sonos_topology = {}                    # dict for topology {uuid1 {'coordinator': 'RINCON_', 'members': {'RINCON_7828CAEAC58601400'}}, uuid2....
         self.alive = None
         
         # init HttpServer
-        if self._http_server_ip and self._http_server_port:
-            self.client = HttpServer(self._http_server_ip, self._http_server_port, self)
-            self.client.startup()
-        else:
-            self.logger.error(f"Settings for Webhook server incorrect. Server will not be started.")
-            # self._init_complete = False
+        self.client = HttpServer(self._http_server_ip, self._http_server_port, self)
+        
+        # start HttpServer
+        self.client.startup()
 
-        # init webinterface
+        # check webinterface
         if not self.init_webinterface(WebInterface):
             self.logger.error("Unable to start Webinterface")
             self._init_complete = False
         else:
             self.logger.debug(f"Init of Plugin {self.get_shortname()} complete")
-            
+
     def run(self):
         """
         Run method for the plugin
         """
-        # self.logger.debug(f"{self.get_shortname()}: Run method called")
+        self.logger.debug(f"{self.get_shortname()}: Run method called")
+        # setup scheduler for device poll loop   (disable the following line, if you don't need to poll the device. Rember to comment the self_cycle statement in __init__ as well)
+        # self.scheduler_add('poll_device', self.perform, cycle=self._cycle)
         self.alive = True
 
-        # initialize sonos system
+        # read sonos config
         response = self.get_request('zones')
-        self.logger.debug(f"run: zones={response}")
+        self.logger.debug(f"run: response={response}")
         self._decode_zones(response)
 
-        self.sonos_favorites = self.get_request('favorites')
-        self.logger.debug(f"run: favorites={self.sonos_favorites}")
-
-        self.sonos_playlists = self.get_request('playlists')
-        self.logger.debug(f"run: playlists={self.sonos_playlists}")
-
-        # finally run 'get_webhook_data' in an endless loop as long as plugin is alive
+        # finally run 'get_webhook_data' in an endless loop
         self.get_webhook_data()
 
     def stop(self):
@@ -146,40 +167,25 @@ class SonosHttp(SmartPlugin):
                         with the item, caller, source and dest as arguments and in case of the knx plugin the value
                         can be sent to the knx with a knx write function within the knx plugin.
         """
-        _sonos_global_cmd = None
-        _sonos_zone_cmd = None
-        _sonos_zone_info = None
-        _sonos_zone = None
-
-        if self.has_iattr(item.conf, 'sonos_zone_cmd'):
+        if self.has_iattr(item.conf, 'sonos_cmd'):
             # self.logger.debug(f"parse item: {item}")
-            _sonos_zone_cmd = str(self.get_iattr_value(item.conf, 'sonos_zone_cmd'))
-        elif self.has_iattr(item.conf, 'sonos_info'):
-            # self.logger.debug(f"parse item: {item}")
-            _sonos_zone_info = str(self.get_iattr_value(item.conf, 'sonos_zone_info'))
-        elif self.has_iattr(item.conf, 'sonos_global_cmd'):
-            # self.logger.debug(f"parse item: {item}")
-            _sonos_global_cmd = str(self.get_iattr_value(item.conf, 'sonos_global_cmd'))
 
-        if _sonos_global_cmd:
-            self._item_dict[item] = (None, _sonos_global_cmd)
-            return self.update_item
-
-        elif _sonos_zone_cmd or _sonos_zone_info:
-            _lookup_item = item
+            _sonos_cmd = str(self.get_iattr_value(item.conf, 'sonos_cmd'))
+            _sonos_room = None
+            lookup_item = item
             for i in range(3):
-                if self.has_iattr(_lookup_item.conf, 'sonos_zone'):
-                    _sonos_zone = str(self.get_iattr_value(_lookup_item.conf, 'sonos_zone'))
+                if self.has_iattr(lookup_item.conf, 'sonos_room'):
+                    _sonos_room = str(self.get_iattr_value(lookup_item.conf, 'sonos_room'))
                     break
                 else:
-                    _lookup_item = _lookup_item.return_parent()
+                    # self.logger.debug(f"Attribut 'sonos_room' is not found at item={item} at lookup_item={lookup_item}not given")
+                    lookup_item = lookup_item.return_parent()
 
-            if _sonos_zone_cmd and _sonos_zone is not None:
-                self._item_dict[item] = (_sonos_zone, _sonos_zone_cmd)
-                return self.update_item        
-                
-            elif _sonos_zone_info and _sonos_zone is not None:
-                self._item_dict[item] = (_sonos_zone, _sonos_zone_info)
+            if _sonos_room is not None:
+                self._itemlist.append(item)
+                # self.logger.debug(f"Item {item.id()} with sonos_cmd attribut and defined 'sonos_room' found; append to list")
+                self._item_dict[item] = (_sonos_room, _sonos_cmd)
+                return self.update_item
 
     def update_item(self, item, caller=None, source=None, dest=None):
         """
@@ -195,37 +201,39 @@ class SonosHttp(SmartPlugin):
         :param dest: if given it represents the dest
         """
         if self.alive and caller != self.get_shortname():
-            # code to execute if the plugin is not stopped and only, if the item has not been changed by this this plugin:
+            # code to execute if the plugin is not stopped
+            # and only, if the item has not been changed by this this plugin:
             self.logger.info(f"Update item: {item.property.path}, item has been changed outside this plugin")
 
             if item in self._item_dict:
                 self.logger.debug(f"update_item was called with item {item.property.path} with value {item()} from caller {caller}, source {source} and dest {dest}")
 
-                _sonos_zone = self._item_dict[item][0]
+                _sonos_room = self._item_dict[item][0]
                 _sonos_cmd = self._item_dict[item][1]
-                # if global command, _sonos_zone is None
-                _sonos_zone = _sonos_zone if _sonos_zone else ''
 
-                if _sonos_cmd.endswith('_up'):
-                    request = f"{_sonos_zone}/{_sonos_cmd.split('_up')[0]}/+1"
-                elif _sonos_cmd.endswith('_down'):
-                    request = f"{_sonos_zone}/{_sonos_cmd.split('_down')[0]}/-1"
+                if _sonos_cmd in ['volume_up']:
+                    request = f"{_sonos_room}/volume/+1"
+                elif _sonos_cmd in ['volume_down']:
+                    request = f"{_sonos_room}/volume/-1"
                 elif _sonos_cmd in ['play', 'pause', 'playpause', 'mute', 'unmute', 'groupMute', 'groupUnmute', 'togglemute', 'next', 'previous', 'state']:
-                    request = f"{_sonos_zone}/{_sonos_cmd}"
+                    request = f"{_sonos_room}/{_sonos_cmd}"
                 elif 'say' in _sonos_cmd:
-                    request = f"{_sonos_zone}/{_sonos_cmd}/{urlparse.quote(item())}/de"
+                    request = f"{_sonos_room}/{_sonos_cmd}/{urlparse.quote(item())}/de"
                 else:
-                    request = f"{_sonos_zone}/{_sonos_cmd}/{item()}"
+                    request = f"{_sonos_room}/{_sonos_cmd}/{item()}"
 
                 response = self.get_request(request)
                 self.logger.debug(f"update_item: response={response}")
 
     def get_request(self, request):
-        """Create payload, send get request and return response"""
 
         self.logger.debug(f"get_request: request={request}")
+
         protocol = 'http'
-        url_base = f"{protocol}://{self._sonos_http_api_host}:{self._sonos_http_api_port}"
+        ip = self._http_server_ip
+        port = 5005
+        url_base = f"{protocol}://{ip}:{port}"
+
         request = f"{url_base}/{request}"
 
         try:
@@ -244,8 +252,6 @@ class SonosHttp(SmartPlugin):
                 return
 
     def get_webhook_data(self):
-        """get data from queue of server listening on webhook and hand over to decode"""
-        
         while self.alive:
             try:
                 queue_data = self.client.get_queue().get(True, 10)
@@ -270,37 +276,39 @@ class SonosHttp(SmartPlugin):
 
                 elif response_type == "volume-change":
                     # response={'type': 'volume-change', 'data': {'uuid': 'RINCON_7828CAEB625E01400', 'previousVolume': 8, 'newVolume': 8, 'roomName': 'Esszimmer'}}
-                    self._decode_volume(response['data'])
+                    data = response['data']
+                    roomname = data.get('roomName', None)
+                    volume = int(data.get('newVolume', None))
+                    self.update_item_value_change(roomname, 'volume', volume)
 
                 elif response_type == "mute-change":
                     # response={'type': 'mute-change', 'data': {'uuid': 'RINCON_7828CAEB625E01400', 'previousMute': True, 'newMute': True, 'roomName': 'Esszimmer'}}
-                    self._decode_mute(response['data'])
+                    data = response['data']
+                    roomname = data.get('roomName', None)
+                    mute = bool(data.get('newMute', None))
+                    self.update_item_value_change(roomname, 'mute', mute)
 
-    def _update_item_value_change(self, zone, cmd, value):
-        """Updates item values based on sonos zone, sonos_cmd and value"""
-    
+    def update_item_value_change(self, device, cmd, value):
         for item in self._item_dict:
-            _sonos_zone = self._item_dict[item][0]
+            _sonos_room = self._item_dict[item][0]
             _sonos_cmd = self._item_dict[item][1]
 
-            if _sonos_zone == zone and _sonos_cmd == cmd:
+            if _sonos_room == device and _sonos_cmd == cmd:
                 item(value, self.get_shortname())
 
-    def _update_item_value_state(self, zone):
-        """Updates item values based on state dict of sonos zone"""
-    
+    def update_item_value_state(self, device):
         for item in self._item_dict:
-            _sonos_zone = self._item_dict[item][0]
+            _sonos_room = self._item_dict[item][0]
             _sonos_cmd = self._item_dict[item][1]
             _value = None
 
-            if _sonos_zone == zone:
-                sonos_zone_data = self.sonos.get(_sonos_zone, None)
-                if sonos_zone_data:
-                    sonos_zone_data_state = sonos_zone_data.get('state', None)
-                    if sonos_zone_data_state:
+            if _sonos_room == device:
+                sonos_room_data = self.sonos.get(_sonos_room, None)
+                if sonos_room_data:
+                    sonos_room_data_state = sonos_room_data.get('state', None)
+                    if sonos_room_data_state:
                         if _sonos_cmd.startswith('current_'):
-                            current_track = sonos_zone_data_state.get('currentTrack', None)
+                            current_track = sonos_room_data_state.get('currentTrack', None)
                             if current_track:
                                 cmd = _sonos_cmd.split('_')[1]
                                 try:
@@ -308,7 +316,7 @@ class SonosHttp(SmartPlugin):
                                 except:
                                     pass
                         elif _sonos_cmd.startswith('next_'):
-                            next_track = sonos_zone_data_state.get('nextTrack', None)
+                            next_track = sonos_room_data_state.get('nextTrack', None)
                             if next_track:
                                 cmd = _sonos_cmd.split('_')[1]
                                 try:
@@ -316,42 +324,42 @@ class SonosHttp(SmartPlugin):
                                 except:
                                     pass
                         elif _sonos_cmd in ['play', 'playpause']:
-                            playback_state = sonos_zone_data_state.get('playbackState', None)
+                            playback_state = sonos_room_data_state.get('playbackState', None)
                             if playback_state == 'STOPPED':
                                 _value = False
                             else:
                                 _value = True
                         else:
-                            _value = self._recursive_lookup(_sonos_cmd, sonos_zone_data)
+                            _value = self._recursive_lookup(_sonos_cmd, sonos_room_data)
                 if _value is not None:
                     item(_value, self.get_shortname())
 
     def _recursive_lookup(self, k, d):
-        """searched for key k in nested dict d and returns value of k if found and None of key k is not on nested dict"""
-        
-        if k in d:
-            return d[k]
+        """ """
+        if k in d: return d[k]
         for v in d.values():
             if isinstance(v, dict):
                 a = self._recursive_lookup(k, v)
-                if a is not None:
-                    return a
+                if a is not None: return a
         return None
 
-    def _get_uuid_from_zone(self, zone):
-        """get uuid from a zone; uses list of tuples for [(zone1, uuid1), (zone2, uuid2), ...]"""
+    def _get_uuid_from_room(self, room):
+        # list of tuples for [(room1, uuid1), (room2, uuid2), ...]
 
-        return dict(self.sonos_zone_uuid).get(zone, None)
+        for index, data in enumerate(self.sonos_room_uuid):
+            device = data[0]
+            uuid = data[1]
+            # if room == device:
+                # return uuid
+
+        return dict(self.sonos_room_uuid).get(room, None)
 
     def _decode_zones(self, zones):
-        """decode webhook response_type "topology-change" and hand over to _decode_state"""
-    
-        # get all zones and uuids
-        if zones is not None:
-            for entry in zones:
-                members = entry['members']
-                for member in members:
-                    self.sonos_zone_uuid.update([(member['roomName'], member['uuid'])])
+        # get all rooms and uuids
+        for entry in zones:
+            members = entry['members']
+            for member in members:
+                self.sonos_room_uuid.update([(member['roomName'], member['uuid'])])
 
         # get topology
         for entry in zones:
@@ -367,7 +375,6 @@ class SonosHttp(SmartPlugin):
             self._decode_state(entry['coordinator'])
 
     def _decode_state(self, data):
-        """decode webhook response_type "transport-state" and hand over to _update_item_value_state"""
 
         roomname = data.get('roomName', None)
 
@@ -379,21 +386,7 @@ class SonosHttp(SmartPlugin):
         self.sonos[roomname]['state'] = data.get('state', None)
         self.sonos[roomname]['groupstate'] = data.get('groupState', None)
 
-        self._update_item_value_state(roomname)
-
-    def _decode_mute(self, data):
-        """decode webhook response_type "mute-change" and hand over to _update_item_value_change"""
-    
-        roomname = data.get('roomName', None)
-        mute = bool(data.get('newMute', None))
-        self._update_item_value_change(roomname, 'mute', mute)
-
-    def _decode_volume(self, data):
-        """decode webhook response_type "volume-change" and hand over to _update_item_value_change"""
-        
-        roomname = data.get('roomName', None)
-        volume = int(data.get('newVolume', None))
-        self._update_item_value_change(roomname, 'volume', volume)
+        self.update_item_value_state(roomname)
 
 
 class Consumer(object):
@@ -532,23 +525,3 @@ class HttpServer(Consumer):
             logger.debug(f"GET: {str(data)}")
             self.reply()
             Consumer.queue.put(data)
-
-####################################################################################
-#                                Utility Fuctions
-####################################################################################
-
-
-def is_open_port(port):
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        s.bind(("127.0.0.1", port))
-    except socket.error:
-        return False
-    return True
-
-
-def is_valid_port(port):
-    if 1 <= port <= 65535:
-        return True
-    else:
-        return False
