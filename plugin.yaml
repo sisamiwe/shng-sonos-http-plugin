@@ -54,10 +54,18 @@ parameters:
     Server_Port:
         type: int
         mandatory: false
-        default: 1025
+        default: 5007
         description:
             de: 'Port des Servers für Webhook'
             en: 'Port of webhook server'
+
+    Sprache:
+        type: str
+        mandatory: false
+        default: 'de-de'
+        description:
+            de: 'Sprachkürzel für TTS Service'
+            en: 'Acronym for language setting of tts service'
 
 item_attributes:
     sonos_zone:
@@ -113,7 +121,8 @@ item_attributes:
             - 'groupUnmute'             # bool      deactivates group mute
             - 'lockvolumes'             # bool      locks volume
             - 'unlockvolumes'           # bool      unlocks volume
-            - 'favorite'                # str       It now has support for starting favorites.
+            - 'favorite'                # str       Start favorite per name; expected payload: [favorite name]
+            - 'favorite_nr'             # num       Start favorite per number;  expected payload: [favorite number]
             - 'favorites'               # str       with optional "detailed" parameter
             - 'playlist'
             - 'repeat'                  # bool      repeat on/off
@@ -154,10 +163,12 @@ item_attributes:
             - 'current_title'           # str
             - 'current_album'           # str
             - 'current_duration'        # num
+            - 'current_duration_str'    # str
             - 'next_artist'             # str
             - 'next_title'              # str
             - 'next_album'              # str
             - 'next_duration'           # num
+            - 'next_duration_str'       # str
             - 'trackNo'                 # num    
             - 'elapsedTime'             # num
             - 'elapsedTimeFormatted'    # str    

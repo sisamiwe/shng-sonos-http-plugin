@@ -39,7 +39,8 @@ import logging
 import requests
 import json
 import socket
-# from deepdiff import DeepDiff
+import datetime
+from deepdiff import DeepDiff
 
 
 class SonosHttp(SmartPlugin):
@@ -65,6 +66,7 @@ class SonosHttp(SmartPlugin):
         # get the parameters for the plugin (as defined in metadata plugin.yaml):
         self._sonos_http_api_host = self.get_parameter_value('Sonos_HTTP_API_Host') if self.get_parameter_value('Sonos_HTTP_API_Host') != '127.0.0.1' else Utils.get_local_ipv4_address()
         self._sonos_http_api_port = self.get_parameter_value('Sonos_HTTP_API_Port') if is_valid_port(self.get_parameter_value('Sonos_HTTP_API_Port')) else None
+        self._tts_language = self.get_parameter_value('Sprache')
 
         if not self._sonos_http_api_host or not self._sonos_http_api_port:
             self.logger.error(f"Settings for Sonos-HTTP-API-Host incorrect. Plugin will not be started.")
@@ -85,6 +87,7 @@ class SonosHttp(SmartPlugin):
         self.sonos_topology = {}                    # dict for topology {uuid1 {'coordinator': 'RINCON_******', 'members': {'RINCON_******'}}, uuid2....
         self.sonos_favorites = []
         self.sonos_playlists = []
+        self.webhook_thread = None
         self.alive = None
         
         # init HttpServer
@@ -111,27 +114,27 @@ class SonosHttp(SmartPlugin):
 
         # initialize sonos system
         response = self.get_request('zones')
-        self.logger.debug(f"run: zones={response}")
+        # self.logger.debug(f"run: zones={response}")
         self._decode_zones(response)
 
         self.sonos_favorites = self.get_request('favorites')
-        self.logger.debug(f"run: favorites={self.sonos_favorites}")
+        # self.logger.debug(f"run: favorites={self.sonos_favorites}")
 
         self.sonos_playlists = self.get_request('playlists')
-        self.logger.debug(f"run: playlists={self.sonos_playlists}")
+        # self.logger.debug(f"run: playlists={self.sonos_playlists}")
 
-        # finally run 'get_webhook_data' in an endless loop as long as plugin is alive
-        self.get_webhook_data()
+        # finally run 'get_webhook_data' in an endless loop as long as plugin is alive in an own thread
+        self.webhook_startup()
 
     def stop(self):
         """
         Stop method for the plugin
         """
         self.logger.debug(f"{self.get_shortname()}: Stop method called")
-        # self.scheduler_remove('poll_device')
         self.alive = False
         self.client.stop_server()
         self.client.shutdown()
+        self.webhook_shutdown()
     
     def parse_item(self, item):
         """
@@ -152,13 +155,13 @@ class SonosHttp(SmartPlugin):
         _sonos_zone = None
 
         if self.has_iattr(item.conf, 'sonos_zone_cmd'):
-            # self.logger.debug(f"parse item: {item}")
+            # self.logger.debug(f"parse item: {item.id()}")
             _sonos_zone_cmd = str(self.get_iattr_value(item.conf, 'sonos_zone_cmd'))
-        elif self.has_iattr(item.conf, 'sonos_info'):
-            # self.logger.debug(f"parse item: {item}")
+        elif self.has_iattr(item.conf, 'sonos_zone_info'):
+            # self.logger.debug(f"parse item: {item.id()}")
             _sonos_zone_info = str(self.get_iattr_value(item.conf, 'sonos_zone_info'))
         elif self.has_iattr(item.conf, 'sonos_global_cmd'):
-            # self.logger.debug(f"parse item: {item}")
+            # self.logger.debug(f"parse item: {item.id()}")
             _sonos_global_cmd = str(self.get_iattr_value(item.conf, 'sonos_global_cmd'))
 
         if _sonos_global_cmd:
@@ -176,9 +179,11 @@ class SonosHttp(SmartPlugin):
 
             if _sonos_zone_cmd and _sonos_zone is not None:
                 self._item_dict[item] = (_sonos_zone, _sonos_zone_cmd)
+                # self.logger.debug(f"Item with attribut 'sonos_zone_cmd'={_sonos_zone_cmd} for zone='{_sonos_zone}' added")
                 return self.update_item        
                 
-            elif _sonos_zone_info and _sonos_zone is not None:
+            if _sonos_zone_info and _sonos_zone is not None:
+                # self.logger.debug(f"Item with attribut 'sonos_zone_info'={_sonos_zone_info} for zone='{_sonos_zone}' added")
                 self._item_dict[item] = (_sonos_zone, _sonos_zone_info)
 
     def update_item(self, item, caller=None, source=None, dest=None):
@@ -213,7 +218,9 @@ class SonosHttp(SmartPlugin):
                 elif _sonos_cmd in ['play', 'pause', 'playpause', 'mute', 'unmute', 'groupMute', 'groupUnmute', 'togglemute', 'next', 'previous', 'state']:
                     request = f"{_sonos_zone}/{_sonos_cmd}"
                 elif 'say' in _sonos_cmd:
-                    request = f"{_sonos_zone}/{_sonos_cmd}/{urlparse.quote(item())}/de"
+                    request = f"{_sonos_zone}/{_sonos_cmd}/{urlparse.quote(item())}/{self._tts_language}"
+                elif _sonos_cmd == 'favorite_nr':
+                    request = f"{_sonos_zone}/favorite/{self.sonos_favorites[item()-1]}"
                 else:
                     request = f"{_sonos_zone}/{_sonos_cmd}/{item()}"
 
@@ -221,9 +228,14 @@ class SonosHttp(SmartPlugin):
                 self.logger.debug(f"update_item: response={response}")
 
     def get_request(self, request):
-        """Create payload, send get request and return response"""
+        """Create payload, send get request and return response
 
-        self.logger.debug(f"get_request: request={request}")
+            in case of no failure it returns the response
+            in case of failure it returns None
+
+        """
+
+        # self.logger.debug(f"get_request: request={request}")
         protocol = 'http'
         url_base = f"{protocol}://{self._sonos_http_api_host}:{self._sonos_http_api_port}"
         request = f"{url_base}/{request}"
@@ -255,26 +267,53 @@ class SonosHttp(SmartPlugin):
                 # there was nothing in the queue so continue
                 pass
             else:
-                response = json.loads(queue_data)
-                self.logger.debug(f"get_webhook_data: response={response}")
+                try:
+                    response = json.loads(queue_data)
+                except Exception as e:
+                    self.logger.debug(f"get_webhook_data: was not in json format, response skipped")
+                    pass
+                else:
+                    self.logger.debug(f"get_webhook_data: response={response}")
+                    response_type = response['type']
 
-                response_type = response['type']
+                    if response_type == "transport-state":
+                        # response={'type': 'transport-state', 'data': {'uuid': 'RINCON_7828CAEB625E01400', 'coordinator': 'RINCON_7828CAEB625E01400', 'roomName': 'Esszimmer', 'state': {'volume': 10, 'mute': False, 'equalizer': {'bass': 7, 'treble': 8, 'loudness': True}, 'currentTrack': {'artist': 'Antenne Bayern', 'albumArtUri': '/getaa?s=1&u=x-sonosapi-stream%3atop40%3fsid%3d269%26flags%3d32%26sn%3d8', 'duration': 0, 'uri': 'x-sonosapi-stream:top40?sid=269&flags=32&sn=8', 'trackUri': 'x-sonosapi-stream:top40?sid=269&flags=32&sn=8', 'type': 'radio', 'stationName': 'Antenne Bayern', 'absoluteAlbumArtUri': 'http://192.168.2.130:1400/getaa?s=1&u=x-sonosapi-stream%3atop40%3fsid%3d269%26flags%3d32%26sn%3d8'}, 'nextTrack': {'artist': '', 'title': '', 'album': '', 'albumArtUri': '', 'duration': 0, 'uri': ''}, 'trackNo': 1, 'elapsedTime': 0, 'elapsedTimeFormatted': '00:00:00', 'playbackState': 'STOPPED', 'playMode': {'repeat': 'none', 'shuffle': False, 'crossfade': False}}, 'groupState': {'volume': 10, 'mute': False}, 'avTransportUri': 'x-sonosapi-stream:top40?sid=269&flags=32&sn=8', 'avTransportUriMetadata': '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"><item id="-1" parentID="-1" restricted="true"><dc:title>Antenne Bayern</dc:title><upnp:class>object.item.audioItem.audioBroadcast</upnp:class><desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">SA_RINCON68871_</desc></item></DIDL-Lite>'}}
+                        self._decode_state(response['data'])
+                    elif response_type == "topology-change":
+                        # response={'type': 'topology-change', 'data': [{'coordinator': {'uuid': 'RINCON_7828CA59548701400', 'coordinator': 'RINCON_7828CA59548701400', 'roomName': 'TV', 'state': {'volume': 10, 'mute': False, 'equalizer': {'bass': 7, 'treble': 6, 'loudness': True, 'speechEnhancement': True, 'nightMode': False}, 'currentTrack': {'title': 'google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3', 'duration': 2, 'uri': 'http://192.168.2.12:5005/tts/google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3', 'trackUri': 'http://192.168.2.12:5005/tts/google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3', 'type': 'track', 'stationName': '', 'absoluteAlbumArtUri': 'http://192.168.2.12:5005/tts/google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3'}, 'nextTrack': {'artist': '', 'title': '', 'album': '', 'albumArtUri': '', 'duration': 0, 'uri': ''}, 'trackNo': 1, 'elapsedTime': 0, 'elapsedTimeFormatted': '00:00:00', 'playbackState': 'STOPPED', 'playMode': {'repeat': 'none', 'shuffle': False, 'crossfade': False}, 'sub': {'gain': 7, 'crossover': 0, 'polarity': 0, 'enabled': True}}, 'groupState': {'volume': 10, 'mute': False}, 'avTransportUri': 'http://192.168.2.12:5005/tts/google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3', 'avTransportUriMetadata': ''}, 'members': [{'uuid': 'RINCON_7828CA59548701400', 'coordinator': 'RINCON_7828CA59548701400', 'roomName': 'TV', 'state': {'volume': 10, 'mute': False, 'equalizer': {'bass': 7, 'treble': 6, 'loudness': True, 'speechEnhancement': True, 'nightMode': False}, 'currentTrack': {'title': 'google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3', 'duration': 2, 'uri': 'http://192.168.2.12:5005/tts/google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3', 'trackUri': 'http://192.168.2.12:5005/tts/google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3', 'type': 'track', 'stationName': '', 'absoluteAlbumArtUri': 'http://192.168.2.12:5005/tts/google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3'}, 'nextTrack': {'artist': '', 'title': '', 'album': '', 'albumArtUri': '', 'duration': 0, 'uri': ''}, 'trackNo': 1, 'elapsedTime': 0, 'elapsedTimeFormatted': '00:00:00', 'playbackState': 'STOPPED', 'playMode': {'repeat': 'none', 'shuffle': False, 'crossfade': False}, 'sub': {'gain': 7, 'crossover': 0, 'polarity': 0, 'enabled': True}}, 'groupState': {'volume': 10, 'mute': False}, 'avTransportUri': 'http://192.168.2.12:5005/tts/google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3', 'avTransportUriMetadata': ''}], 'uuid': 'RINCON_7828CA59548701400', 'id': 'RINCON_7828CAEB625E01400:1640192871'}, {'coordinator': {'uuid': 'RINCON_7828CAEAC58601400', 'coordinator': 'RINCON_7828CAEAC58601400', 'roomName': 'Büronos', 'state': {'volume': 10, 'mute': False, 'equalizer': {'bass': 7, 'treble': 3, 'loudness': True}, 'currentTrack': {'artist': 'BR Schlager', 'title': 'BR Schlager', 'albumArtUri': '/getaa?s=1&u=x-sonosapi-stream%3atunein%253a15544%3fsid%3d303%26flags%3d8224%26sn%3d9', 'duration': 0, 'uri': 'x-sonosapi-stream:tunein%3a15544?sid=303&flags=8224&sn=9', 'trackUri': 'x-sonosapi-stream:tunein%3a15544?sid=303&flags=8224&sn=9', 'type': 'radio', 'stationName': 'BR Schlager', 'absoluteAlbumArtUri': 'http://192.168.2.123:1400/getaa?s=1&u=x-sonosapi-stream%3atunein%253a15544%3fsid%3d303%26flags%3d8224%26sn%3d9'}, 'nextTrack': {'artist': '', 'title': '', 'album': '', 'albumArtUri': '', 'duration': 0, 'uri': ''}, 'trackNo': 1, 'elapsedTime': 0, 'elapsedTimeFormatted': '00:00:00', 'playbackState': 'STOPPED', 'playMode': {'repeat': 'none', 'shuffle': False, 'crossfade': False}}, 'groupState': {'volume': 10, 'mute': False}, 'avTransportUri': 'x-sonosapi-stream:tunein%3a15544?sid=303&flags=8224&sn=9', 'avTransportUriMetadata': '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"><item id="-1" parentID="-1" restricted="true"><dc:title>BR Schlager</dc:title><upnp:class>object.item.audioItem.audioBroadcast</upnp:class><desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">SA_RINCON77575_X_#Svc77575-644c3615-Token</desc></item></DIDL-Lite>'}, 'members': [{'uuid': 'RINCON_7828CAEAC58601400', 'coordinator': 'RINCON_7828CAEAC58601400', 'roomName': 'Büronos', 'state': {'volume': 10, 'mute': False, 'equalizer': {'bass': 7, 'treble': 3, 'loudness': True}, 'currentTrack': {'artist': 'BR Schlager', 'title': 'BR Schlager', 'albumArtUri': '/getaa?s=1&u=x-sonosapi-stream%3atunein%253a15544%3fsid%3d303%26flags%3d8224%26sn%3d9', 'duration': 0, 'uri': 'x-sonosapi-stream:tunein%3a15544?sid=303&flags=8224&sn=9', 'trackUri': 'x-sonosapi-stream:tunein%3a15544?sid=303&flags=8224&sn=9', 'type': 'radio', 'stationName': 'BR Schlager', 'absoluteAlbumArtUri': 'http://192.168.2.123:1400/getaa?s=1&u=x-sonosapi-stream%3atunein%253a15544%3fsid%3d303%26flags%3d8224%26sn%3d9'}, 'nextTrack': {'artist': '', 'title': '', 'album': '', 'albumArtUri': '', 'duration': 0, 'uri': ''}, 'trackNo': 1, 'elapsedTime': 0, 'elapsedTimeFormatted': '00:00:00', 'playbackState': 'STOPPED', 'playMode': {'repeat': 'none', 'shuffle': False, 'crossfade': False}}, 'groupState': {'volume': 10, 'mute': False}, 'avTransportUri': 'x-sonosapi-stream:tunein%3a15544?sid=303&flags=8224&sn=9', 'avTransportUriMetadata': '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"><item id="-1" parentID="-1" restricted="true"><dc:title>BR Schlager</dc:title><upnp:class>object.item.audioItem.audioBroadcast</upnp:class><desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">SA_RINCON77575_X_#Svc77575-644c3615-Token</desc></item></DIDL-Lite>'}], 'uuid': 'RINCON_7828CAEAC58601400', 'id': 'RINCON_7828CAEAC58601400:3457120174'}, {'coordinator': {'uuid': 'RINCON_7828CA060F5401400', 'coordinator': 'RINCON_7828CA060F5401400', 'roomName': 'Carlisonos', 'state': {'volume': 10, 'mute': False, 'equalizer': {'bass': 4, 'treble': 4, 'loudness': True}, 'currentTrack': {'title': 'google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3', 'duration': 2, 'uri': 'http://192.168.2.12:5005/tts/google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3', 'trackUri': 'http://192.168.2.12:5005/tts/google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3', 'type': 'track', 'stationName': '', 'absoluteAlbumArtUri': 'http://192.168.2.12:5005/tts/google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3'}, 'nextTrack': {'artist': '', 'title': '', 'album': '', 'albumArtUri': '', 'duration': 0, 'uri': ''}, 'trackNo': 1, 'elapsedTime': 0, 'elapsedTimeFormatted': '00:00:00', 'playbackState': 'STOPPED', 'playMode': {'repeat': 'none', 'shuffle': False, 'crossfade': False}}, 'groupState': {'volume': 10, 'mute': False}, 'avTransportUri': 'http://192.168.2.12:5005/tts/google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3', 'avTransportUriMetadata': ''}, 'members': [{'uuid': 'RINCON_7828CA060F5401400', 'coordinator': 'RINCON_7828CA060F5401400', 'roomName': 'Carlisonos', 'state': {'volume': 10, 'mute': False, 'equalizer': {'bass': 4, 'treble': 4, 'loudness': True}, 'currentTrack': {'title': 'google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3', 'duration': 2, 'uri': 'http://192.168.2.12:5005/tts/google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3', 'trackUri': 'http://192.168.2.12:5005/tts/google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3', 'type': 'track', 'stationName': '', 'absoluteAlbumArtUri': 'http://192.168.2.12:5005/tts/google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3'}, 'nextTrack': {'artist': '', 'title': '', 'album': '', 'albumArtUri': '', 'duration': 0, 'uri': ''}, 'trackNo': 1, 'elapsedTime': 0, 'elapsedTimeFormatted': '00:00:00', 'playbackState': 'STOPPED', 'playMode': {'repeat': 'none', 'shuffle': False, 'crossfade': False}}, 'groupState': {'volume': 10, 'mute': False}, 'avTransportUri': 'http://192.168.2.12:5005/tts/google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3', 'avTransportUriMetadata': ''}], 'uuid': 'RINCON_7828CA060F5401400', 'id': 'RINCON_7828CA060F5401400:2557459617'}, {'coordinator': {'uuid': 'RINCON_7828CAEB625E01400', 'coordinator': 'RINCON_7828CAEB625E01400', 'roomName': 'Esszimmer', 'state': {'volume': 10, 'mute': False, 'equalizer': {'bass': 7, 'treble': 8, 'loudness': True}, 'currentTrack': {'artist': 'Antenne Bayern', 'title': 'ZPSTR_BUFFERING', 'albumArtUri': '/getaa?s=1&u=x-sonosapi-stream%3atop40%3fsid%3d269%26flags%3d32%26sn%3d8', 'duration': 0, 'uri': 'x-sonosapi-stream:top40?sid=269&flags=32&sn=8', 'trackUri': 'x-sonosapi-stream:top40?sid=269&flags=32&sn=8', 'type': 'radio', 'stationName': 'Antenne Bayern', 'absoluteAlbumArtUri': 'http://192.168.2.130:1400/getaa?s=1&u=x-sonosapi-stream%3atop40%3fsid%3d269%26flags%3d32%26sn%3d8'}, 'nextTrack': {'artist': '', 'title': '', 'album': '', 'albumArtUri': '', 'duration': 0, 'uri': ''}, 'trackNo': 1, 'elapsedTime': 0, 'elapsedTimeFormatted': '00:00:00', 'playbackState': 'TRANSITIONING', 'playMode': {'repeat': 'none', 'shuffle': False, 'crossfade': False}}, 'groupState': {'volume': 10, 'mute': False}, 'avTransportUri': 'x-sonosapi-stream:top40?sid=269&flags=32&sn=8', 'avTransportUriMetadata': '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"><item id="-1" parentID="-1" restricted="true"><dc:title>Antenne Bayern</dc:title><upnp:class>object.item.audioItem.audioBroadcast</upnp:class><desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">SA_RINCON68871_</desc></item></DIDL-Lite>'}, 'members': [{'uuid': 'RINCON_7828CAEB625E01400', 'coordinator': 'RINCON_7828CAEB625E01400', 'roomName': 'Esszimmer', 'state': {'volume': 10, 'mute': False, 'equalizer': {'bass': 7, 'treble': 8, 'loudness': True}, 'currentTrack': {'artist': 'Antenne Bayern', 'title': 'ZPSTR_BUFFERING', 'albumArtUri': '/getaa?s=1&u=x-sonosapi-stream%3atop40%3fsid%3d269%26flags%3d32%26sn%3d8', 'duration': 0, 'uri': 'x-sonosapi-stream:top40?sid=269&flags=32&sn=8', 'trackUri': 'x-sonosapi-stream:top40?sid=269&flags=32&sn=8', 'type': 'radio', 'stationName': 'Antenne Bayern', 'absoluteAlbumArtUri': 'http://192.168.2.130:1400/getaa?s=1&u=x-sonosapi-stream%3atop40%3fsid%3d269%26flags%3d32%26sn%3d8'}, 'nextTrack': {'artist': '', 'title': '', 'album': '', 'albumArtUri': '', 'duration': 0, 'uri': ''}, 'trackNo': 1, 'elapsedTime': 0, 'elapsedTimeFormatted': '00:00:00', 'playbackState': 'TRANSITIONING', 'playMode': {'repeat': 'none', 'shuffle': False, 'crossfade': False}}, 'groupState': {'volume': 10, 'mute': False}, 'avTransportUri': 'x-sonosapi-stream:top40?sid=269&flags=32&sn=8', 'avTransportUriMetadata': '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"><item id="-1" parentID="-1" restricted="true"><dc:title>Antenne Bayern</dc:title><upnp:class>object.item.audioItem.audioBroadcast</upnp:class><desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">SA_RINCON68871_</desc></item></DIDL-Lite>'}], 'uuid': 'RINCON_7828CAEB625E01400', 'id': 'RINCON_7828CAEB625E01400:1640192896'}]}
+                        self._decode_zones(response['data'])
+                    elif response_type == "volume-change":
+                        # response={'type': 'volume-change', 'data': {'uuid': 'RINCON_7828CAEB625E01400', 'previousVolume': 8, 'newVolume': 8, 'roomName': 'Esszimmer'}}
+                        self._decode_volume(response['data'])
+                    elif response_type == "mute-change":
+                        # response={'type': 'mute-change', 'data': {'uuid': 'RINCON_7828CAEB625E01400', 'previousMute': True, 'newMute': True, 'roomName': 'Esszimmer'}}
+                        self._decode_mute(response['data'])
 
-                if response_type == "transport-state":
-                    # response={'type': 'transport-state', 'data': {'uuid': 'RINCON_7828CAEB625E01400', 'coordinator': 'RINCON_7828CAEB625E01400', 'roomName': 'Esszimmer', 'state': {'volume': 10, 'mute': False, 'equalizer': {'bass': 7, 'treble': 8, 'loudness': True}, 'currentTrack': {'artist': 'Antenne Bayern', 'albumArtUri': '/getaa?s=1&u=x-sonosapi-stream%3atop40%3fsid%3d269%26flags%3d32%26sn%3d8', 'duration': 0, 'uri': 'x-sonosapi-stream:top40?sid=269&flags=32&sn=8', 'trackUri': 'x-sonosapi-stream:top40?sid=269&flags=32&sn=8', 'type': 'radio', 'stationName': 'Antenne Bayern', 'absoluteAlbumArtUri': 'http://192.168.2.130:1400/getaa?s=1&u=x-sonosapi-stream%3atop40%3fsid%3d269%26flags%3d32%26sn%3d8'}, 'nextTrack': {'artist': '', 'title': '', 'album': '', 'albumArtUri': '', 'duration': 0, 'uri': ''}, 'trackNo': 1, 'elapsedTime': 0, 'elapsedTimeFormatted': '00:00:00', 'playbackState': 'STOPPED', 'playMode': {'repeat': 'none', 'shuffle': False, 'crossfade': False}}, 'groupState': {'volume': 10, 'mute': False}, 'avTransportUri': 'x-sonosapi-stream:top40?sid=269&flags=32&sn=8', 'avTransportUriMetadata': '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"><item id="-1" parentID="-1" restricted="true"><dc:title>Antenne Bayern</dc:title><upnp:class>object.item.audioItem.audioBroadcast</upnp:class><desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">SA_RINCON68871_</desc></item></DIDL-Lite>'}}
-                    self._decode_state(response['data'])
+    def webhook_startup(self):
+        """Start a thread that to get Webhook data in endless loop"""
 
-                elif response_type == "topology-change":
-                    # response={'type': 'topology-change', 'data': [{'coordinator': {'uuid': 'RINCON_7828CA59548701400', 'coordinator': 'RINCON_7828CA59548701400', 'roomName': 'TV', 'state': {'volume': 10, 'mute': False, 'equalizer': {'bass': 7, 'treble': 6, 'loudness': True, 'speechEnhancement': True, 'nightMode': False}, 'currentTrack': {'title': 'google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3', 'duration': 2, 'uri': 'http://192.168.2.12:5005/tts/google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3', 'trackUri': 'http://192.168.2.12:5005/tts/google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3', 'type': 'track', 'stationName': '', 'absoluteAlbumArtUri': 'http://192.168.2.12:5005/tts/google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3'}, 'nextTrack': {'artist': '', 'title': '', 'album': '', 'albumArtUri': '', 'duration': 0, 'uri': ''}, 'trackNo': 1, 'elapsedTime': 0, 'elapsedTimeFormatted': '00:00:00', 'playbackState': 'STOPPED', 'playMode': {'repeat': 'none', 'shuffle': False, 'crossfade': False}, 'sub': {'gain': 7, 'crossover': 0, 'polarity': 0, 'enabled': True}}, 'groupState': {'volume': 10, 'mute': False}, 'avTransportUri': 'http://192.168.2.12:5005/tts/google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3', 'avTransportUriMetadata': ''}, 'members': [{'uuid': 'RINCON_7828CA59548701400', 'coordinator': 'RINCON_7828CA59548701400', 'roomName': 'TV', 'state': {'volume': 10, 'mute': False, 'equalizer': {'bass': 7, 'treble': 6, 'loudness': True, 'speechEnhancement': True, 'nightMode': False}, 'currentTrack': {'title': 'google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3', 'duration': 2, 'uri': 'http://192.168.2.12:5005/tts/google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3', 'trackUri': 'http://192.168.2.12:5005/tts/google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3', 'type': 'track', 'stationName': '', 'absoluteAlbumArtUri': 'http://192.168.2.12:5005/tts/google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3'}, 'nextTrack': {'artist': '', 'title': '', 'album': '', 'albumArtUri': '', 'duration': 0, 'uri': ''}, 'trackNo': 1, 'elapsedTime': 0, 'elapsedTimeFormatted': '00:00:00', 'playbackState': 'STOPPED', 'playMode': {'repeat': 'none', 'shuffle': False, 'crossfade': False}, 'sub': {'gain': 7, 'crossover': 0, 'polarity': 0, 'enabled': True}}, 'groupState': {'volume': 10, 'mute': False}, 'avTransportUri': 'http://192.168.2.12:5005/tts/google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3', 'avTransportUriMetadata': ''}], 'uuid': 'RINCON_7828CA59548701400', 'id': 'RINCON_7828CAEB625E01400:1640192871'}, {'coordinator': {'uuid': 'RINCON_7828CAEAC58601400', 'coordinator': 'RINCON_7828CAEAC58601400', 'roomName': 'Büronos', 'state': {'volume': 10, 'mute': False, 'equalizer': {'bass': 7, 'treble': 3, 'loudness': True}, 'currentTrack': {'artist': 'BR Schlager', 'title': 'BR Schlager', 'albumArtUri': '/getaa?s=1&u=x-sonosapi-stream%3atunein%253a15544%3fsid%3d303%26flags%3d8224%26sn%3d9', 'duration': 0, 'uri': 'x-sonosapi-stream:tunein%3a15544?sid=303&flags=8224&sn=9', 'trackUri': 'x-sonosapi-stream:tunein%3a15544?sid=303&flags=8224&sn=9', 'type': 'radio', 'stationName': 'BR Schlager', 'absoluteAlbumArtUri': 'http://192.168.2.123:1400/getaa?s=1&u=x-sonosapi-stream%3atunein%253a15544%3fsid%3d303%26flags%3d8224%26sn%3d9'}, 'nextTrack': {'artist': '', 'title': '', 'album': '', 'albumArtUri': '', 'duration': 0, 'uri': ''}, 'trackNo': 1, 'elapsedTime': 0, 'elapsedTimeFormatted': '00:00:00', 'playbackState': 'STOPPED', 'playMode': {'repeat': 'none', 'shuffle': False, 'crossfade': False}}, 'groupState': {'volume': 10, 'mute': False}, 'avTransportUri': 'x-sonosapi-stream:tunein%3a15544?sid=303&flags=8224&sn=9', 'avTransportUriMetadata': '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"><item id="-1" parentID="-1" restricted="true"><dc:title>BR Schlager</dc:title><upnp:class>object.item.audioItem.audioBroadcast</upnp:class><desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">SA_RINCON77575_X_#Svc77575-644c3615-Token</desc></item></DIDL-Lite>'}, 'members': [{'uuid': 'RINCON_7828CAEAC58601400', 'coordinator': 'RINCON_7828CAEAC58601400', 'roomName': 'Büronos', 'state': {'volume': 10, 'mute': False, 'equalizer': {'bass': 7, 'treble': 3, 'loudness': True}, 'currentTrack': {'artist': 'BR Schlager', 'title': 'BR Schlager', 'albumArtUri': '/getaa?s=1&u=x-sonosapi-stream%3atunein%253a15544%3fsid%3d303%26flags%3d8224%26sn%3d9', 'duration': 0, 'uri': 'x-sonosapi-stream:tunein%3a15544?sid=303&flags=8224&sn=9', 'trackUri': 'x-sonosapi-stream:tunein%3a15544?sid=303&flags=8224&sn=9', 'type': 'radio', 'stationName': 'BR Schlager', 'absoluteAlbumArtUri': 'http://192.168.2.123:1400/getaa?s=1&u=x-sonosapi-stream%3atunein%253a15544%3fsid%3d303%26flags%3d8224%26sn%3d9'}, 'nextTrack': {'artist': '', 'title': '', 'album': '', 'albumArtUri': '', 'duration': 0, 'uri': ''}, 'trackNo': 1, 'elapsedTime': 0, 'elapsedTimeFormatted': '00:00:00', 'playbackState': 'STOPPED', 'playMode': {'repeat': 'none', 'shuffle': False, 'crossfade': False}}, 'groupState': {'volume': 10, 'mute': False}, 'avTransportUri': 'x-sonosapi-stream:tunein%3a15544?sid=303&flags=8224&sn=9', 'avTransportUriMetadata': '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"><item id="-1" parentID="-1" restricted="true"><dc:title>BR Schlager</dc:title><upnp:class>object.item.audioItem.audioBroadcast</upnp:class><desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">SA_RINCON77575_X_#Svc77575-644c3615-Token</desc></item></DIDL-Lite>'}], 'uuid': 'RINCON_7828CAEAC58601400', 'id': 'RINCON_7828CAEAC58601400:3457120174'}, {'coordinator': {'uuid': 'RINCON_7828CA060F5401400', 'coordinator': 'RINCON_7828CA060F5401400', 'roomName': 'Carlisonos', 'state': {'volume': 10, 'mute': False, 'equalizer': {'bass': 4, 'treble': 4, 'loudness': True}, 'currentTrack': {'title': 'google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3', 'duration': 2, 'uri': 'http://192.168.2.12:5005/tts/google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3', 'trackUri': 'http://192.168.2.12:5005/tts/google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3', 'type': 'track', 'stationName': '', 'absoluteAlbumArtUri': 'http://192.168.2.12:5005/tts/google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3'}, 'nextTrack': {'artist': '', 'title': '', 'album': '', 'albumArtUri': '', 'duration': 0, 'uri': ''}, 'trackNo': 1, 'elapsedTime': 0, 'elapsedTimeFormatted': '00:00:00', 'playbackState': 'STOPPED', 'playMode': {'repeat': 'none', 'shuffle': False, 'crossfade': False}}, 'groupState': {'volume': 10, 'mute': False}, 'avTransportUri': 'http://192.168.2.12:5005/tts/google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3', 'avTransportUriMetadata': ''}, 'members': [{'uuid': 'RINCON_7828CA060F5401400', 'coordinator': 'RINCON_7828CA060F5401400', 'roomName': 'Carlisonos', 'state': {'volume': 10, 'mute': False, 'equalizer': {'bass': 4, 'treble': 4, 'loudness': True}, 'currentTrack': {'title': 'google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3', 'duration': 2, 'uri': 'http://192.168.2.12:5005/tts/google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3', 'trackUri': 'http://192.168.2.12:5005/tts/google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3', 'type': 'track', 'stationName': '', 'absoluteAlbumArtUri': 'http://192.168.2.12:5005/tts/google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3'}, 'nextTrack': {'artist': '', 'title': '', 'album': '', 'albumArtUri': '', 'duration': 0, 'uri': ''}, 'trackNo': 1, 'elapsedTime': 0, 'elapsedTimeFormatted': '00:00:00', 'playbackState': 'STOPPED', 'playMode': {'repeat': 'none', 'shuffle': False, 'crossfade': False}}, 'groupState': {'volume': 10, 'mute': False}, 'avTransportUri': 'http://192.168.2.12:5005/tts/google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3', 'avTransportUriMetadata': ''}], 'uuid': 'RINCON_7828CA060F5401400', 'id': 'RINCON_7828CA060F5401400:2557459617'}, {'coordinator': {'uuid': 'RINCON_7828CAEB625E01400', 'coordinator': 'RINCON_7828CAEB625E01400', 'roomName': 'Esszimmer', 'state': {'volume': 10, 'mute': False, 'equalizer': {'bass': 7, 'treble': 8, 'loudness': True}, 'currentTrack': {'artist': 'Antenne Bayern', 'title': 'ZPSTR_BUFFERING', 'albumArtUri': '/getaa?s=1&u=x-sonosapi-stream%3atop40%3fsid%3d269%26flags%3d32%26sn%3d8', 'duration': 0, 'uri': 'x-sonosapi-stream:top40?sid=269&flags=32&sn=8', 'trackUri': 'x-sonosapi-stream:top40?sid=269&flags=32&sn=8', 'type': 'radio', 'stationName': 'Antenne Bayern', 'absoluteAlbumArtUri': 'http://192.168.2.130:1400/getaa?s=1&u=x-sonosapi-stream%3atop40%3fsid%3d269%26flags%3d32%26sn%3d8'}, 'nextTrack': {'artist': '', 'title': '', 'album': '', 'albumArtUri': '', 'duration': 0, 'uri': ''}, 'trackNo': 1, 'elapsedTime': 0, 'elapsedTimeFormatted': '00:00:00', 'playbackState': 'TRANSITIONING', 'playMode': {'repeat': 'none', 'shuffle': False, 'crossfade': False}}, 'groupState': {'volume': 10, 'mute': False}, 'avTransportUri': 'x-sonosapi-stream:top40?sid=269&flags=32&sn=8', 'avTransportUriMetadata': '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"><item id="-1" parentID="-1" restricted="true"><dc:title>Antenne Bayern</dc:title><upnp:class>object.item.audioItem.audioBroadcast</upnp:class><desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">SA_RINCON68871_</desc></item></DIDL-Lite>'}, 'members': [{'uuid': 'RINCON_7828CAEB625E01400', 'coordinator': 'RINCON_7828CAEB625E01400', 'roomName': 'Esszimmer', 'state': {'volume': 10, 'mute': False, 'equalizer': {'bass': 7, 'treble': 8, 'loudness': True}, 'currentTrack': {'artist': 'Antenne Bayern', 'title': 'ZPSTR_BUFFERING', 'albumArtUri': '/getaa?s=1&u=x-sonosapi-stream%3atop40%3fsid%3d269%26flags%3d32%26sn%3d8', 'duration': 0, 'uri': 'x-sonosapi-stream:top40?sid=269&flags=32&sn=8', 'trackUri': 'x-sonosapi-stream:top40?sid=269&flags=32&sn=8', 'type': 'radio', 'stationName': 'Antenne Bayern', 'absoluteAlbumArtUri': 'http://192.168.2.130:1400/getaa?s=1&u=x-sonosapi-stream%3atop40%3fsid%3d269%26flags%3d32%26sn%3d8'}, 'nextTrack': {'artist': '', 'title': '', 'album': '', 'albumArtUri': '', 'duration': 0, 'uri': ''}, 'trackNo': 1, 'elapsedTime': 0, 'elapsedTimeFormatted': '00:00:00', 'playbackState': 'TRANSITIONING', 'playMode': {'repeat': 'none', 'shuffle': False, 'crossfade': False}}, 'groupState': {'volume': 10, 'mute': False}, 'avTransportUri': 'x-sonosapi-stream:top40?sid=269&flags=32&sn=8', 'avTransportUriMetadata': '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"><item id="-1" parentID="-1" restricted="true"><dc:title>Antenne Bayern</dc:title><upnp:class>object.item.audioItem.audioBroadcast</upnp:class><desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">SA_RINCON68871_</desc></item></DIDL-Lite>'}], 'uuid': 'RINCON_7828CAEB625E01400', 'id': 'RINCON_7828CAEB625E01400:1640192896'}]}
-                    self._decode_zones(response['data'])
+        try:
+            self._webhook_thread = threading.Thread(target=self.get_webhook_data)
+            self._webhook_thread.setDaemon(False)
+            _name = 'plugins.' + self.get_fullname() + '.SonosHttpWebhook'
+            self._webhook_thread.setName(_name)
+            self._webhook_thread.start()
+        except threading.ThreadError:
+            self.logger.error("Unable to launch SonosHttpWebhook thread")
+            self._webhook_thread = None
 
-                elif response_type == "volume-change":
-                    # response={'type': 'volume-change', 'data': {'uuid': 'RINCON_7828CAEB625E01400', 'previousVolume': 8, 'newVolume': 8, 'roomName': 'Esszimmer'}}
-                    self._decode_volume(response['data'])
+    def webhook_shutdown(self):
+        """Shut a thread that to get Webhook data in endless loop"""
 
-                elif response_type == "mute-change":
-                    # response={'type': 'mute-change', 'data': {'uuid': 'RINCON_7828CAEB625E01400', 'previousMute': True, 'newMute': True, 'roomName': 'Esszimmer'}}
-                    self._decode_mute(response['data'])
+        if self._webhook_thread:
+            # terminate the thread
+            self._webhook_thread.join()
+            # log the outcome
+            if self._webhook_thread.is_alive():
+                self.logger.error("Unable to shut down SonosHttpWebhook thread")
+            else:
+                self.logger.info("SonosHttpWebhook thread has been terminated")
+        self._webhook_thread = None
 
     def _update_item_value_change(self, zone, cmd, value):
         """Updates item values based on sonos zone, sonos_cmd and value"""
@@ -284,37 +323,46 @@ class SonosHttp(SmartPlugin):
             _sonos_cmd = self._item_dict[item][1]
 
             if _sonos_zone == zone and _sonos_cmd == cmd:
-                item(value, self.get_shortname())
+                item(value, self.get_shortname(), _sonos_cmd)
 
     def _update_item_value_state(self, zone):
         """Updates item values based on state dict of sonos zone"""
-    
+
+        # self.logger.debug(f"_update_item_value_state called for zone {zone}")
+
         for item in self._item_dict:
             _sonos_zone = self._item_dict[item][0]
             _sonos_cmd = self._item_dict[item][1]
             _value = None
 
             if _sonos_zone == zone:
+                # self.logger.debug(f"item {item.id()} to be updated since part of zone='{zone} with _sonos_cmd='{_sonos_cmd}'")
                 sonos_zone_data = self.sonos.get(_sonos_zone, None)
-                if sonos_zone_data:
+                if sonos_zone_data is not None:
                     sonos_zone_data_state = sonos_zone_data.get('state', None)
-                    if sonos_zone_data_state:
+                    if sonos_zone_data_state is not None:
                         if _sonos_cmd.startswith('current_'):
                             current_track = sonos_zone_data_state.get('currentTrack', None)
-                            if current_track:
+                            if current_track is not None:
                                 cmd = _sonos_cmd.split('_')[1]
                                 try:
                                     _value = current_track[cmd]
                                 except:
                                     pass
+                                else:
+                                    if cmd == 'duration' and _sonos_cmd.endswith('_str'):
+                                        _value = convert_sec_to_str(_value)
                         elif _sonos_cmd.startswith('next_'):
                             next_track = sonos_zone_data_state.get('nextTrack', None)
-                            if next_track:
+                            if next_track is not None:
                                 cmd = _sonos_cmd.split('_')[1]
                                 try:
                                     _value = next_track[cmd]
                                 except:
                                     pass
+                                else:
+                                    if cmd == 'duration' and _sonos_cmd.endswith('_str'):
+                                        _value = convert_sec_to_str(_value)
                         elif _sonos_cmd in ['play', 'playpause']:
                             playback_state = sonos_zone_data_state.get('playbackState', None)
                             if playback_state == 'STOPPED':
@@ -322,9 +370,17 @@ class SonosHttp(SmartPlugin):
                             else:
                                 _value = True
                         else:
+                            if _sonos_cmd in ['togglemute']:
+                                _sonos_cmd = 'mute'
+
                             _value = self._recursive_lookup(_sonos_cmd, sonos_zone_data)
-                if _value is not None:
-                    item(_value, self.get_shortname())
+
+                        if _value is not None:
+                            item(_value, self.get_shortname(), _sonos_cmd)
+                    else:
+                        self.logger.warning(f"no 'sonos_zone_data_state' data")
+                else:
+                    self.logger.warning(f"no 'sonos_zone_data' data")
 
     def _recursive_lookup(self, k, d):
         """searched for key k in nested dict d and returns value of k if found and None of key k is not on nested dict"""
@@ -345,41 +401,44 @@ class SonosHttp(SmartPlugin):
 
     def _decode_zones(self, zones):
         """decode webhook response_type "topology-change" and hand over to _decode_state"""
-    
-        # get all zones and uuids
+
         if zones is not None:
+            # get all zones and uuids
             for entry in zones:
                 members = entry['members']
                 for member in members:
                     self.sonos_zone_uuid.update([(member['roomName'], member['uuid'])])
 
-        # get topology
-        for entry in zones:
-            uuid = entry['uuid']
-            if entry['uuid'] not in self.sonos_topology:
-                self.sonos_topology[uuid] = {}
-            self.sonos_topology[uuid]['coordinator'] = entry['coordinator']['uuid']
-            if self.sonos_topology[uuid].get('members', None) is None:
-                self.sonos_topology[uuid]['members'] = set()
-            for member in entry['members']:
-                self.sonos_topology[uuid]['members'].update([(member['uuid'])])
-            # decode state
-            self._decode_state(entry['coordinator'])
+            # get topology
+            for entry in zones:
+                uuid = entry['uuid']
+                if entry['uuid'] not in self.sonos_topology:
+                    self.sonos_topology[uuid] = {}
+                self.sonos_topology[uuid]['coordinator'] = entry['coordinator']['uuid']
+                if self.sonos_topology[uuid].get('members', None) is None:
+                    self.sonos_topology[uuid]['members'] = set()
+                for member in entry['members']:
+                    self.sonos_topology[uuid]['members'].update([(member['uuid'])])
+                # decode state
+                self._decode_state(entry['coordinator'])
+
+        else:
+            self.logger.warning(f"_decode_zones: Input was {zones}; get request might have been not succesfull")
 
     def _decode_state(self, data):
         """decode webhook response_type "transport-state" and hand over to _update_item_value_state"""
 
-        roomname = data.get('roomName', None)
+        zone_name = data.get('roomName', None)
 
-        if roomname not in self.sonos:
-            self.sonos[roomname] = {}
+        if zone_name not in self.sonos:
+            self.sonos[zone_name] = {}
 
-        self.sonos[roomname]['uuid'] = data.get('uuid', None)
-        self.sonos[roomname]['coordinator'] = data.get('coordinator', None)
-        self.sonos[roomname]['state'] = data.get('state', None)
-        self.sonos[roomname]['groupstate'] = data.get('groupState', None)
+        self.sonos[zone_name]['uuid'] = data.get('uuid', None)
+        self.sonos[zone_name]['coordinator'] = data.get('coordinator', None)
+        self.sonos[zone_name]['state'] = data.get('state', None)
+        self.sonos[zone_name]['groupstate'] = data.get('groupState', None)
 
-        self._update_item_value_state(roomname)
+        self._update_item_value_state(zone_name)
 
     def _decode_mute(self, data):
         """decode webhook response_type "mute-change" and hand over to _update_item_value_change"""
@@ -387,6 +446,7 @@ class SonosHttp(SmartPlugin):
         roomname = data.get('roomName', None)
         mute = bool(data.get('newMute', None))
         self._update_item_value_change(roomname, 'mute', mute)
+        self._update_item_value_change(roomname, 'tooglemute', not(mute))
 
     def _decode_volume(self, data):
         """decode webhook response_type "volume-change" and hand over to _update_item_value_change"""
@@ -403,11 +463,8 @@ class Consumer(object):
 
     def __init__(self, plugin_instance):
 
-        # init instance
+        # get instance
         self._plugin_instance = plugin_instance
-        
-        # do logging
-        self._plugin_instance.logger.debug("Starting Collector Object")
 
     def startup(self):
         pass
@@ -420,7 +477,7 @@ class Consumer(object):
 
 
 class HttpServer(Consumer):
-    """Use the ecowitt protocol (not WU protocol) to capture data"""
+    """Create HTTP Server to get Webhook Data"""
 
     def __init__(self, tcp_server_address, tcp_server_port, plugin_instance):
 
@@ -433,7 +490,7 @@ class HttpServer(Consumer):
         self._server_thread = None
 
         # log the relevant settings/parameters we are using
-        self._plugin_instance.logger.debug("Starting HttpServer")
+        self._plugin_instance.logger.debug("Starting SonosHttpServer")
 
         # init tcp server
         self._server = HttpServer.TCPServer(tcp_server_address, tcp_server_port, HttpServer.Handler, plugin_instance)
@@ -446,7 +503,7 @@ class HttpServer(Consumer):
         self._server = None
 
     def startup(self):
-        """Start a thread that collects data from the GW1000/GW1100 TCP."""
+        """Start a thread for SonosHttpServer."""
 
         try:
             self._server_thread = threading.Thread(target=self.run_server)
@@ -459,7 +516,7 @@ class HttpServer(Consumer):
             self._server_thread = None
 
     def shutdown(self):
-        """Shut down the thread that collects data from the GW1000/GW1100 TCP."""
+        """Shut down the thread for SonosHttpServer"""
 
         if self._server_thread:
             # terminate the thread
@@ -490,7 +547,7 @@ class HttpServer(Consumer):
             self._plugin_instance = plugin_instance
             
             # init TCP Server
-            self._plugin_instance.logger.info(f"start tcp server at {address}:{port}")
+            self._plugin_instance.logger.info(f"start SonosHttpServer at {address}:{port}")
             socketserver.TCPServer.__init__(self, (address, int(port)), handler)
 
         def run(self):
@@ -498,7 +555,7 @@ class HttpServer(Consumer):
             self.serve_forever()
 
         def stop(self):
-            self._plugin_instance.logger.debug("stop SonosHttp server")
+            self._plugin_instance.logger.debug("stop SonosHttpServer")
             self.shutdown()
             self.server_close()
 
@@ -552,3 +609,487 @@ def is_valid_port(port):
         return True
     else:
         return False
+
+
+def convert_sec_to_str(seconds):
+    return str(datetime.timedelta(seconds=seconds))
+
+
+
+"""
+# response={'type': 'topology-change', 'data': [{'coordinator': {'uuid': 'RINCON_7828CA59548701400', 'coordinator': 'RINCON_7828CA59548701400', 'roomName': 'TV', 'state': {'volume': 10, 'mute': False, 'equalizer': {'bass': 7, 'treble': 6, 'loudness': True, 'speechEnhancement': True, 'nightMode': False}, 'currentTrack': {'title': 'google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3', 'duration': 2, 'uri': 'http://192.168.2.12:5005/tts/google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3', 'trackUri': 'http://192.168.2.12:5005/tts/google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3', 'type': 'track', 'stationName': '', 'absoluteAlbumArtUri': 'http://192.168.2.12:5005/tts/google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3'}, 'nextTrack': {'artist': '', 'title': '', 'album': '', 'albumArtUri': '', 'duration': 0, 'uri': ''}, 'trackNo': 1, 'elapsedTime': 0, 'elapsedTimeFormatted': '00:00:00', 'playbackState': 'STOPPED', 'playMode': {'repeat': 'none', 'shuffle': False, 'crossfade': False}, 'sub': {'gain': 7, 'crossover': 0, 'polarity': 0, 'enabled': True}}, 'groupState': {'volume': 10, 'mute': False}, 'avTransportUri': 'http://192.168.2.12:5005/tts/google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3', 'avTransportUriMetadata': ''}, 'members': [{'uuid': 'RINCON_7828CA59548701400', 'coordinator': 'RINCON_7828CA59548701400', 'roomName': 'TV', 'state': {'volume': 10, 'mute': False, 'equalizer': {'bass': 7, 'treble': 6, 'loudness': True, 'speechEnhancement': True, 'nightMode': False}, 'currentTrack': {'title': 'google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3', 'duration': 2, 'uri': 'http://192.168.2.12:5005/tts/google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3', 'trackUri': 'http://192.168.2.12:5005/tts/google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3', 'type': 'track', 'stationName': '', 'absoluteAlbumArtUri': 'http://192.168.2.12:5005/tts/google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3'}, 'nextTrack': {'artist': '', 'title': '', 'album': '', 'albumArtUri': '', 'duration': 0, 'uri': ''}, 'trackNo': 1, 'elapsedTime': 0, 'elapsedTimeFormatted': '00:00:00', 'playbackState': 'STOPPED', 'playMode': {'repeat': 'none', 'shuffle': False, 'crossfade': False}, 'sub': {'gain': 7, 'crossover': 0, 'polarity': 0, 'enabled': True}}, 'groupState': {'volume': 10, 'mute': False}, 'avTransportUri': 'http://192.168.2.12:5005/tts/google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3', 'avTransportUriMetadata': ''}], 'uuid': 'RINCON_7828CA59548701400', 'id': 'RINCON_7828CAEB625E01400:1640192871'}, {'coordinator': {'uuid': 'RINCON_7828CAEAC58601400', 'coordinator': 'RINCON_7828CAEAC58601400', 'roomName': 'Büronos', 'state': {'volume': 10, 'mute': False, 'equalizer': {'bass': 7, 'treble': 3, 'loudness': True}, 'currentTrack': {'artist': 'BR Schlager', 'title': 'BR Schlager', 'albumArtUri': '/getaa?s=1&u=x-sonosapi-stream%3atunein%253a15544%3fsid%3d303%26flags%3d8224%26sn%3d9', 'duration': 0, 'uri': 'x-sonosapi-stream:tunein%3a15544?sid=303&flags=8224&sn=9', 'trackUri': 'x-sonosapi-stream:tunein%3a15544?sid=303&flags=8224&sn=9', 'type': 'radio', 'stationName': 'BR Schlager', 'absoluteAlbumArtUri': 'http://192.168.2.123:1400/getaa?s=1&u=x-sonosapi-stream%3atunein%253a15544%3fsid%3d303%26flags%3d8224%26sn%3d9'}, 'nextTrack': {'artist': '', 'title': '', 'album': '', 'albumArtUri': '', 'duration': 0, 'uri': ''}, 'trackNo': 1, 'elapsedTime': 0, 'elapsedTimeFormatted': '00:00:00', 'playbackState': 'STOPPED', 'playMode': {'repeat': 'none', 'shuffle': False, 'crossfade': False}}, 'groupState': {'volume': 10, 'mute': False}, 'avTransportUri': 'x-sonosapi-stream:tunein%3a15544?sid=303&flags=8224&sn=9', 'avTransportUriMetadata': '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"><item id="-1" parentID="-1" restricted="true"><dc:title>BR Schlager</dc:title><upnp:class>object.item.audioItem.audioBroadcast</upnp:class><desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">SA_RINCON77575_X_#Svc77575-644c3615-Token</desc></item></DIDL-Lite>'}, 'members': [{'uuid': 'RINCON_7828CAEAC58601400', 'coordinator': 'RINCON_7828CAEAC58601400', 'roomName': 'Büronos', 'state': {'volume': 10, 'mute': False, 'equalizer': {'bass': 7, 'treble': 3, 'loudness': True}, 'currentTrack': {'artist': 'BR Schlager', 'title': 'BR Schlager', 'albumArtUri': '/getaa?s=1&u=x-sonosapi-stream%3atunein%253a15544%3fsid%3d303%26flags%3d8224%26sn%3d9', 'duration': 0, 'uri': 'x-sonosapi-stream:tunein%3a15544?sid=303&flags=8224&sn=9', 'trackUri': 'x-sonosapi-stream:tunein%3a15544?sid=303&flags=8224&sn=9', 'type': 'radio', 'stationName': 'BR Schlager', 'absoluteAlbumArtUri': 'http://192.168.2.123:1400/getaa?s=1&u=x-sonosapi-stream%3atunein%253a15544%3fsid%3d303%26flags%3d8224%26sn%3d9'}, 'nextTrack': {'artist': '', 'title': '', 'album': '', 'albumArtUri': '', 'duration': 0, 'uri': ''}, 'trackNo': 1, 'elapsedTime': 0, 'elapsedTimeFormatted': '00:00:00', 'playbackState': 'STOPPED', 'playMode': {'repeat': 'none', 'shuffle': False, 'crossfade': False}}, 'groupState': {'volume': 10, 'mute': False}, 'avTransportUri': 'x-sonosapi-stream:tunein%3a15544?sid=303&flags=8224&sn=9', 'avTransportUriMetadata': '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"><item id="-1" parentID="-1" restricted="true"><dc:title>BR Schlager</dc:title><upnp:class>object.item.audioItem.audioBroadcast</upnp:class><desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">SA_RINCON77575_X_#Svc77575-644c3615-Token</desc></item></DIDL-Lite>'}], 'uuid': 'RINCON_7828CAEAC58601400', 'id': 'RINCON_7828CAEAC58601400:3457120174'}, {'coordinator': {'uuid': 'RINCON_7828CA060F5401400', 'coordinator': 'RINCON_7828CA060F5401400', 'roomName': 'Carlisonos', 'state': {'volume': 10, 'mute': False, 'equalizer': {'bass': 4, 'treble': 4, 'loudness': True}, 'currentTrack': {'title': 'google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3', 'duration': 2, 'uri': 'http://192.168.2.12:5005/tts/google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3', 'trackUri': 'http://192.168.2.12:5005/tts/google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3', 'type': 'track', 'stationName': '', 'absoluteAlbumArtUri': 'http://192.168.2.12:5005/tts/google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3'}, 'nextTrack': {'artist': '', 'title': '', 'album': '', 'albumArtUri': '', 'duration': 0, 'uri': ''}, 'trackNo': 1, 'elapsedTime': 0, 'elapsedTimeFormatted': '00:00:00', 'playbackState': 'STOPPED', 'playMode': {'repeat': 'none', 'shuffle': False, 'crossfade': False}}, 'groupState': {'volume': 10, 'mute': False}, 'avTransportUri': 'http://192.168.2.12:5005/tts/google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3', 'avTransportUriMetadata': ''}, 'members': [{'uuid': 'RINCON_7828CA060F5401400', 'coordinator': 'RINCON_7828CA060F5401400', 'roomName': 'Carlisonos', 'state': {'volume': 10, 'mute': False, 'equalizer': {'bass': 4, 'treble': 4, 'loudness': True}, 'currentTrack': {'title': 'google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3', 'duration': 2, 'uri': 'http://192.168.2.12:5005/tts/google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3', 'trackUri': 'http://192.168.2.12:5005/tts/google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3', 'type': 'track', 'stationName': '', 'absoluteAlbumArtUri': 'http://192.168.2.12:5005/tts/google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3'}, 'nextTrack': {'artist': '', 'title': '', 'album': '', 'albumArtUri': '', 'duration': 0, 'uri': ''}, 'trackNo': 1, 'elapsedTime': 0, 'elapsedTimeFormatted': '00:00:00', 'playbackState': 'STOPPED', 'playMode': {'repeat': 'none', 'shuffle': False, 'crossfade': False}}, 'groupState': {'volume': 10, 'mute': False}, 'avTransportUri': 'http://192.168.2.12:5005/tts/google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3', 'avTransportUriMetadata': ''}], 'uuid': 'RINCON_7828CA060F5401400', 'id': 'RINCON_7828CA060F5401400:2557459617'}, {'coordinator': {'uuid': 'RINCON_7828CAEB625E01400', 'coordinator': 'RINCON_7828CAEB625E01400', 'roomName': 'Esszimmer', 'state': {'volume': 10, 'mute': False, 'equalizer': {'bass': 7, 'treble': 8, 'loudness': True}, 'currentTrack': {'artist': 'Antenne Bayern', 'albumArtUri': '/getaa?s=1&u=x-sonosapi-stream%3atop40%3fsid%3d269%26flags%3d32%26sn%3d8', 'duration': 0, 'uri': 'x-sonosapi-stream:top40?sid=269&flags=32&sn=8', 'trackUri': 'x-sonosapi-stream:top40?sid=269&flags=32&sn=8', 'type': 'radio', 'stationName': 'Antenne Bayern', 'absoluteAlbumArtUri': 'http://192.168.2.130:1400/getaa?s=1&u=x-sonosapi-stream%3atop40%3fsid%3d269%26flags%3d32%26sn%3d8'}, 'nextTrack': {'artist': '', 'title': '', 'album': '', 'albumArtUri': '', 'duration': 0, 'uri': ''}, 'trackNo': 1, 'elapsedTime': 0, 'elapsedTimeFormatted': '00:00:00', 'playbackState': 'STOPPED', 'playMode': {'repeat': 'none', 'shuffle': False, 'crossfade': False}}, 'groupState': {'volume': 10, 'mute': False}, 'avTransportUri': 'x-sonosapi-stream:top40?sid=269&flags=32&sn=8', 'avTransportUriMetadata': '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"><item id="-1" parentID="-1" restricted="true"><dc:title>Antenne Bayern</dc:title><upnp:class>object.item.audioItem.audioBroadcast</upnp:class><desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">SA_RINCON68871_</desc></item></DIDL-Lite>'}, 'members': [{'uuid': 'RINCON_7828CAEB625E01400', 'coordinator': 'RINCON_7828CAEB625E01400', 'roomName': 'Esszimmer', 'state': {'volume': 10, 'mute': False, 'equalizer': {'bass': 7, 'treble': 8, 'loudness': True}, 'currentTrack': {'artist': 'Antenne Bayern', 'albumArtUri': '/getaa?s=1&u=x-sonosapi-stream%3atop40%3fsid%3d269%26flags%3d32%26sn%3d8', 'duration': 0, 'uri': 'x-sonosapi-stream:top40?sid=269&flags=32&sn=8', 'trackUri': 'x-sonosapi-stream:top40?sid=269&flags=32&sn=8', 'type': 'radio', 'stationName': 'Antenne Bayern', 'absoluteAlbumArtUri': 'http://192.168.2.130:1400/getaa?s=1&u=x-sonosapi-stream%3atop40%3fsid%3d269%26flags%3d32%26sn%3d8'}, 'nextTrack': {'artist': '', 'title': '', 'album': '', 'albumArtUri': '', 'duration': 0, 'uri': ''}, 'trackNo': 1, 'elapsedTime': 0, 'elapsedTimeFormatted': '00:00:00', 'playbackState': 'STOPPED', 'playMode': {'repeat': 'none', 'shuffle': False, 'crossfade': False}}, 'groupState': {'volume': 10, 'mute': False}, 'avTransportUri': 'x-sonosapi-stream:top40?sid=269&flags=32&sn=8', 'avTransportUriMetadata': '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"><item id="-1" parentID="-1" restricted="true"><dc:title>Antenne Bayern</dc:title><upnp:class>object.item.audioItem.audioBroadcast</upnp:class><desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">SA_RINCON68871_</desc></item></DIDL-Lite>'}], 'uuid': 'RINCON_7828CAEB625E01400', 'id': 'RINCON_7828CAEB625E01400:1640192896'}]}
+data =
+        {
+          "type": "topology-change",
+          "data": [
+            {
+              "coordinator": {
+                "uuid": "RINCON_7828CA59548701400",
+                "coordinator": "RINCON_7828CA59548701400",
+                "roomName": "TV",
+                "state": {
+                  "volume": 10,
+                  "mute": false,
+                  "equalizer": {
+                    "bass": 7,
+                    "treble": 6,
+                    "loudness": true,
+                    "speechEnhancement": true,
+                    "nightMode": false
+                  },
+                  "currentTrack": {
+                    "title": "google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3",
+                    "duration": 2,
+                    "uri": "http://192.168.2.12:5005/tts/google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3",
+                    "trackUri": "http://192.168.2.12:5005/tts/google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3",
+                    "type": "track",
+                    "stationName": "",
+                    "absoluteAlbumArtUri": "http://192.168.2.12:5005/tts/google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3"
+                  },
+                  "nextTrack": {
+                    "artist": "",
+                    "title": "",
+                    "album": "",
+                    "albumArtUri": "",
+                    "duration": 0,
+                    "uri": ""
+                  },
+                  "trackNo": 1,
+                  "elapsedTime": 0,
+                  "elapsedTimeFormatted": "00:00:00",
+                  "playbackState": "STOPPED",
+                  "playMode": {
+                    "repeat": "none",
+                    "shuffle": false,
+                    "crossfade": false
+                  },
+                  "sub": {
+                    "gain": 7,
+                    "crossover": 0,
+                    "polarity": 0,
+                    "enabled": true
+                  }
+                },
+                "groupState": {
+                  "volume": 10,
+                  "mute": false
+                },
+                "avTransportUri": "http://192.168.2.12:5005/tts/google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3",
+                "avTransportUriMetadata": ""
+              },
+              "members": [
+                {
+                  "uuid": "RINCON_7828CA59548701400",
+                  "coordinator": "RINCON_7828CA59548701400",
+                  "roomName": "TV",
+                  "state": {
+                    "volume": 10,
+                    "mute": false,
+                    "equalizer": {
+                      "bass": 7,
+                      "treble": 6,
+                      "loudness": true,
+                      "speechEnhancement": true,
+                      "nightMode": false
+                    },
+                    "currentTrack": {
+                      "title": "google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3",
+                      "duration": 2,
+                      "uri": "http://192.168.2.12:5005/tts/google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3",
+                      "trackUri": "http://192.168.2.12:5005/tts/google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3",
+                      "type": "track",
+                      "stationName": "",
+                      "absoluteAlbumArtUri": "http://192.168.2.12:5005/tts/google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3"
+                    },
+                    "nextTrack": {
+                      "artist": "",
+                      "title": "",
+                      "album": "",
+                      "albumArtUri": "",
+                      "duration": 0,
+                      "uri": ""
+                    },
+                    "trackNo": 1,
+                    "elapsedTime": 0,
+                    "elapsedTimeFormatted": "00:00:00",
+                    "playbackState": "STOPPED",
+                    "playMode": {
+                      "repeat": "none",
+                      "shuffle": false,
+                      "crossfade": false
+                    },
+                    "sub": {
+                      "gain": 7,
+                      "crossover": 0,
+                      "polarity": 0,
+                      "enabled": true
+                    }
+                  },
+                  "groupState": {
+                    "volume": 10,
+                    "mute": false
+                  },
+                  "avTransportUri": "http://192.168.2.12:5005/tts/google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3",
+                  "avTransportUriMetadata": ""
+                }
+              ],
+              "uuid": "RINCON_7828CA59548701400",
+              "id": "RINCON_7828CAEB625E01400:1640192871"
+            },
+            {
+              "coordinator": {
+                "uuid": "RINCON_7828CAEAC58601400",
+                "coordinator": "RINCON_7828CAEAC58601400",
+                "roomName": "B\u00fcronos",
+                "state": {
+                  "volume": 10,
+                  "mute": false,
+                  "equalizer": {
+                    "bass": 7,
+                    "treble": 3,
+                    "loudness": true
+                  },
+                  "currentTrack": {
+                    "artist": "BR Schlager",
+                    "title": "BR Schlager",
+                    "albumArtUri": "/getaa?s=1&u=x-sonosapi-stream%3atunein%253a15544%3fsid%3d303%26flags%3d8224%26sn%3d9",
+                    "duration": 0,
+                    "uri": "x-sonosapi-stream:tunein%3a15544?sid=303&flags=8224&sn=9",
+                    "trackUri": "x-sonosapi-stream:tunein%3a15544?sid=303&flags=8224&sn=9",
+                    "type": "radio",
+                    "stationName": "BR Schlager",
+                    "absoluteAlbumArtUri": "http://192.168.2.123:1400/getaa?s=1&u=x-sonosapi-stream%3atunein%253a15544%3fsid%3d303%26flags%3d8224%26sn%3d9"
+                  },
+                  "nextTrack": {
+                    "artist": "",
+                    "title": "",
+                    "album": "",
+                    "albumArtUri": "",
+                    "duration": 0,
+                    "uri": ""
+                  },
+                  "trackNo": 1,
+                  "elapsedTime": 0,
+                  "elapsedTimeFormatted": "00:00:00",
+                  "playbackState": "STOPPED",
+                  "playMode": {
+                    "repeat": "none",
+                    "shuffle": false,
+                    "crossfade": false
+                  }
+                },
+                "groupState": {
+                  "volume": 10,
+                  "mute": false
+                },
+                "avTransportUri": "x-sonosapi-stream:tunein%3a15544?sid=303&flags=8224&sn=9",
+                "avTransportUriMetadata": "<DIDL-Lite xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\" xmlns:r=\"urn:schemas-rinconnetworks-com:metadata-1-0/\" xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\"><item id=\"-1\" parentID=\"-1\" restricted=\"true\"><dc:title>BR Schlager</dc:title><upnp:class>object.item.audioItem.audioBroadcast</upnp:class><desc id=\"cdudn\" nameSpace=\"urn:schemas-rinconnetworks-com:metadata-1-0/\">SA_RINCON77575_X_#Svc77575-644c3615-Token</desc></item></DIDL-Lite>"
+              },
+              "members": [
+                {
+                  "uuid": "RINCON_7828CAEAC58601400",
+                  "coordinator": "RINCON_7828CAEAC58601400",
+                  "roomName": "B\u00fcronos",
+                  "state": {
+                    "volume": 10,
+                    "mute": false,
+                    "equalizer": {
+                      "bass": 7,
+                      "treble": 3,
+                      "loudness": true
+                    },
+                    "currentTrack": {
+                      "artist": "BR Schlager",
+                      "title": "BR Schlager",
+                      "albumArtUri": "/getaa?s=1&u=x-sonosapi-stream%3atunein%253a15544%3fsid%3d303%26flags%3d8224%26sn%3d9",
+                      "duration": 0,
+                      "uri": "x-sonosapi-stream:tunein%3a15544?sid=303&flags=8224&sn=9",
+                      "trackUri": "x-sonosapi-stream:tunein%3a15544?sid=303&flags=8224&sn=9",
+                      "type": "radio",
+                      "stationName": "BR Schlager",
+                      "absoluteAlbumArtUri": "http://192.168.2.123:1400/getaa?s=1&u=x-sonosapi-stream%3atunein%253a15544%3fsid%3d303%26flags%3d8224%26sn%3d9"
+                    },
+                    "nextTrack": {
+                      "artist": "",
+                      "title": "",
+                      "album": "",
+                      "albumArtUri": "",
+                      "duration": 0,
+                      "uri": ""
+                    },
+                    "trackNo": 1,
+                    "elapsedTime": 0,
+                    "elapsedTimeFormatted": "00:00:00",
+                    "playbackState": "STOPPED",
+                    "playMode": {
+                      "repeat": "none",
+                      "shuffle": false,
+                      "crossfade": false
+                    }
+                  },
+                  "groupState": {
+                    "volume": 10,
+                    "mute": false
+                  },
+                  "avTransportUri": "x-sonosapi-stream:tunein%3a15544?sid=303&flags=8224&sn=9",
+                  "avTransportUriMetadata": "<DIDL-Lite xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\" xmlns:r=\"urn:schemas-rinconnetworks-com:metadata-1-0/\" xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\"><item id=\"-1\" parentID=\"-1\" restricted=\"true\"><dc:title>BR Schlager</dc:title><upnp:class>object.item.audioItem.audioBroadcast</upnp:class><desc id=\"cdudn\" nameSpace=\"urn:schemas-rinconnetworks-com:metadata-1-0/\">SA_RINCON77575_X_#Svc77575-644c3615-Token</desc></item></DIDL-Lite>"
+                }
+              ],
+              "uuid": "RINCON_7828CAEAC58601400",
+              "id": "RINCON_7828CAEAC58601400:3457120174"
+            },
+            {
+              "coordinator": {
+                "uuid": "RINCON_7828CA060F5401400",
+                "coordinator": "RINCON_7828CA060F5401400",
+                "roomName": "Carlisonos",
+                "state": {
+                  "volume": 10,
+                  "mute": false,
+                  "equalizer": {
+                    "bass": 4,
+                    "treble": 4,
+                    "loudness": true
+                  },
+                  "currentTrack": {
+                    "title": "google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3",
+                    "duration": 2,
+                    "uri": "http://192.168.2.12:5005/tts/google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3",
+                    "trackUri": "http://192.168.2.12:5005/tts/google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3",
+                    "type": "track",
+                    "stationName": "",
+                    "absoluteAlbumArtUri": "http://192.168.2.12:5005/tts/google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3"
+                  },
+                  "nextTrack": {
+                    "artist": "",
+                    "title": "",
+                    "album": "",
+                    "albumArtUri": "",
+                    "duration": 0,
+                    "uri": ""
+                  },
+                  "trackNo": 1,
+                  "elapsedTime": 0,
+                  "elapsedTimeFormatted": "00:00:00",
+                  "playbackState": "STOPPED",
+                  "playMode": {
+                    "repeat": "none",
+                    "shuffle": false,
+                    "crossfade": false
+                  }
+                },
+                "groupState": {
+                  "volume": 10,
+                  "mute": false
+                },
+                "avTransportUri": "http://192.168.2.12:5005/tts/google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3",
+                "avTransportUriMetadata": ""
+              },
+              "members": [
+                {
+                  "uuid": "RINCON_7828CA060F5401400",
+                  "coordinator": "RINCON_7828CA060F5401400",
+                  "roomName": "Carlisonos",
+                  "state": {
+                    "volume": 10,
+                    "mute": false,
+                    "equalizer": {
+                      "bass": 4,
+                      "treble": 4,
+                      "loudness": true
+                    },
+                    "currentTrack": {
+                      "title": "google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3",
+                      "duration": 2,
+                      "uri": "http://192.168.2.12:5005/tts/google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3",
+                      "trackUri": "http://192.168.2.12:5005/tts/google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3",
+                      "type": "track",
+                      "stationName": "",
+                      "absoluteAlbumArtUri": "http://192.168.2.12:5005/tts/google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3"
+                    },
+                    "nextTrack": {
+                      "artist": "",
+                      "title": "",
+                      "album": "",
+                      "albumArtUri": "",
+                      "duration": 0,
+                      "uri": ""
+                    },
+                    "trackNo": 1,
+                    "elapsedTime": 0,
+                    "elapsedTimeFormatted": "00:00:00",
+                    "playbackState": "STOPPED",
+                    "playMode": {
+                      "repeat": "none",
+                      "shuffle": false,
+                      "crossfade": false
+                    }
+                  },
+                  "groupState": {
+                    "volume": 10,
+                    "mute": false
+                  },
+                  "avTransportUri": "http://192.168.2.12:5005/tts/google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3",
+                  "avTransportUriMetadata": ""
+                }
+              ],
+              "uuid": "RINCON_7828CA060F5401400",
+              "id": "RINCON_7828CA060F5401400:2557459617"
+            },
+            {
+              "coordinator": {
+                "uuid": "RINCON_7828CAEB625E01400",
+                "coordinator": "RINCON_7828CAEB625E01400",
+                "roomName": "Esszimmer",
+                "state": {
+                  "volume": 10,
+                  "mute": false,
+                  "equalizer": {
+                    "bass": 7,
+                    "treble": 8,
+                    "loudness": true
+                  },
+                  "currentTrack": {
+                    "artist": "Antenne Bayern",
+                    "albumArtUri": "/getaa?s=1&u=x-sonosapi-stream%3atop40%3fsid%3d269%26flags%3d32%26sn%3d8",
+                    "duration": 0,
+                    "uri": "x-sonosapi-stream:top40?sid=269&flags=32&sn=8",
+                    "trackUri": "x-sonosapi-stream:top40?sid=269&flags=32&sn=8",
+                    "type": "radio",
+                    "stationName": "Antenne Bayern",
+                    "absoluteAlbumArtUri": "http://192.168.2.130:1400/getaa?s=1&u=x-sonosapi-stream%3atop40%3fsid%3d269%26flags%3d32%26sn%3d8"
+                  },
+                  "nextTrack": {
+                    "artist": "",
+                    "title": "",
+                    "album": "",
+                    "albumArtUri": "",
+                    "duration": 0,
+                    "uri": ""
+                  },
+                  "trackNo": 1,
+                  "elapsedTime": 0,
+                  "elapsedTimeFormatted": "00:00:00",
+                  "playbackState": "STOPPED",
+                  "playMode": {
+                    "repeat": "none",
+                    "shuffle": false,
+                    "crossfade": false
+                  }
+                },
+                "groupState": {
+                  "volume": 10,
+                  "mute": false
+                },
+                "avTransportUri": "x-sonosapi-stream:top40?sid=269&flags=32&sn=8",
+                "avTransportUriMetadata": "<DIDL-Lite xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\" xmlns:r=\"urn:schemas-rinconnetworks-com:metadata-1-0/\" xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\"><item id=\"-1\" parentID=\"-1\" restricted=\"true\"><dc:title>Antenne Bayern</dc:title><upnp:class>object.item.audioItem.audioBroadcast</upnp:class><desc id=\"cdudn\" nameSpace=\"urn:schemas-rinconnetworks-com:metadata-1-0/\">SA_RINCON68871_</desc></item></DIDL-Lite>"
+              },
+              "members": [
+                {
+                  "uuid": "RINCON_7828CAEB625E01400",
+                  "coordinator": "RINCON_7828CAEB625E01400",
+                  "roomName": "Esszimmer",
+                  "state": {
+                    "volume": 10,
+                    "mute": false,
+                    "equalizer": {
+                      "bass": 7,
+                      "treble": 8,
+                      "loudness": true
+                    },
+                    "currentTrack": {
+                      "artist": "Antenne Bayern",
+                      "albumArtUri": "/getaa?s=1&u=x-sonosapi-stream%3atop40%3fsid%3d269%26flags%3d32%26sn%3d8",
+                      "duration": 0,
+                      "uri": "x-sonosapi-stream:top40?sid=269&flags=32&sn=8",
+                      "trackUri": "x-sonosapi-stream:top40?sid=269&flags=32&sn=8",
+                      "type": "radio",
+                      "stationName": "Antenne Bayern",
+                      "absoluteAlbumArtUri": "http://192.168.2.130:1400/getaa?s=1&u=x-sonosapi-stream%3atop40%3fsid%3d269%26flags%3d32%26sn%3d8"
+                    },
+                    "nextTrack": {
+                      "artist": "",
+                      "title": "",
+                      "album": "",
+                      "albumArtUri": "",
+                      "duration": 0,
+                      "uri": ""
+                    },
+                    "trackNo": 1,
+                    "elapsedTime": 0,
+                    "elapsedTimeFormatted": "00:00:00",
+                    "playbackState": "STOPPED",
+                    "playMode": {
+                      "repeat": "none",
+                      "shuffle": false,
+                      "crossfade": false
+                    }
+                  },
+                  "groupState": {
+                    "volume": 10,
+                    "mute": false
+                  },
+                  "avTransportUri": "x-sonosapi-stream:top40?sid=269&flags=32&sn=8",
+                  "avTransportUriMetadata": "<DIDL-Lite xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\" xmlns:r=\"urn:schemas-rinconnetworks-com:metadata-1-0/\" xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\"><item id=\"-1\" parentID=\"-1\" restricted=\"true\"><dc:title>Antenne Bayern</dc:title><upnp:class>object.item.audioItem.audioBroadcast</upnp:class><desc id=\"cdudn\" nameSpace=\"urn:schemas-rinconnetworks-com:metadata-1-0/\">SA_RINCON68871_</desc></item></DIDL-Lite>"
+                }
+              ],
+              "uuid": "RINCON_7828CAEB625E01400",
+              "id": "RINCON_7828CAEB625E01400:1640192896"
+            }
+          ]
+        }
+
+
+# response={'type': 'transport-state', 'data': {'uuid': 'RINCON_7828CAEB625E01400', 'coordinator': 'RINCON_7828CAEB625E01400', 'roomName': 'Esszimmer', 'state': {'volume': 10, 'mute': False, 'equalizer': {'bass': 7, 'treble': 8, 'loudness': True}, 'currentTrack': {'artist': 'Antenne Bayern', 'albumArtUri': '/getaa?s=1&u=x-sonosapi-stream%3atop40%3fsid%3d269%26flags%3d32%26sn%3d8', 'duration': 0, 'uri': 'x-sonosapi-stream:top40?sid=269&flags=32&sn=8', 'trackUri': 'x-sonosapi-stream:top40?sid=269&flags=32&sn=8', 'type': 'radio', 'stationName': 'Antenne Bayern', 'absoluteAlbumArtUri': 'http://192.168.2.130:1400/getaa?s=1&u=x-sonosapi-stream%3atop40%3fsid%3d269%26flags%3d32%26sn%3d8'}, 'nextTrack': {'artist': '', 'title': '', 'album': '', 'albumArtUri': '', 'duration': 0, 'uri': ''}, 'trackNo': 1, 'elapsedTime': 0, 'elapsedTimeFormatted': '00:00:00', 'playbackState': 'STOPPED', 'playMode': {'repeat': 'none', 'shuffle': False, 'crossfade': False}}, 'groupState': {'volume': 10, 'mute': False}, 'avTransportUri': 'x-sonosapi-stream:top40?sid=269&flags=32&sn=8', 'avTransportUriMetadata': '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"><item id="-1" parentID="-1" restricted="true"><dc:title>Antenne Bayern</dc:title><upnp:class>object.item.audioItem.audioBroadcast</upnp:class><desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">SA_RINCON68871_</desc></item></DIDL-Lite>'}}
+data =  {
+          "type": "transport-state",
+          "data": {
+            "uuid": "RINCON_7828CAEB625E01400",
+            "coordinator": "RINCON_7828CAEB625E01400",
+            "roomName": "Esszimmer",
+            "state": {
+              "volume": 10,
+              "mute": false,
+              "equalizer": {
+                "bass": 7,
+                "treble": 8,
+                "loudness": true
+              },
+              "currentTrack": {
+                "artist": "Antenne Bayern",
+                "albumArtUri": "/getaa?s=1&u=x-sonosapi-stream%3atop40%3fsid%3d269%26flags%3d32%26sn%3d8",
+                "duration": 0,
+                "uri": "x-sonosapi-stream:top40?sid=269&flags=32&sn=8",
+                "trackUri": "x-sonosapi-stream:top40?sid=269&flags=32&sn=8",
+                "type": "radio",
+                "stationName": "Antenne Bayern",
+                "absoluteAlbumArtUri": "http://192.168.2.130:1400/getaa?s=1&u=x-sonosapi-stream%3atop40%3fsid%3d269%26flags%3d32%26sn%3d8"
+              },
+              "nextTrack": {
+                "artist": "",
+                "title": "",
+                "album": "",
+                "albumArtUri": "",
+                "duration": 0,
+                "uri": ""
+              },
+              "trackNo": 1,
+              "elapsedTime": 0,
+              "elapsedTimeFormatted": "00:00:00",
+              "playbackState": "STOPPED",
+              "playMode": {
+                "repeat": "none",
+                "shuffle": false,
+                "crossfade": false
+              }
+            },
+            "groupState": {
+              "volume": 10,
+              "mute": false
+            },
+            "avTransportUri": "x-sonosapi-stream:top40?sid=269&flags=32&sn=8",
+            "avTransportUriMetadata": "<DIDL-Lite xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\" xmlns:r=\"urn:schemas-rinconnetworks-com:metadata-1-0/\" xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\"><item id=\"-1\" parentID=\"-1\" restricted=\"true\"><dc:title>Antenne Bayern</dc:title><upnp:class>object.item.audioItem.audioBroadcast</upnp:class><desc id=\"cdudn\" nameSpace=\"urn:schemas-rinconnetworks-com:metadata-1-0/\">SA_RINCON68871_</desc></item></DIDL-Lite>"
+          }
+        }   
+
+"""
