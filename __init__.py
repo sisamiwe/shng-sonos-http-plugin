@@ -40,7 +40,6 @@ import requests
 import json
 import socket
 import datetime
-from deepdiff import DeepDiff
 
 
 class SonosHttp(SmartPlugin):
@@ -85,8 +84,8 @@ class SonosHttp(SmartPlugin):
         self.sonos = {}                             # dict to hold state information per zone
         self.sonos_zone_uuid = set()                # set of tuples for [(zone1, uuid1), (zone2, uuid2), ...]
         self.sonos_topology = {}                    # dict for topology {uuid1 {'coordinator': 'RINCON_******', 'members': {'RINCON_******'}}, uuid2....
-        self.sonos_favorites = []
-        self.sonos_playlists = []
+        self.sonos_favorites = []                   # list holding sonos favourites
+        self.sonos_playlists = []                   # list holding sonos playlists
         self.webhook_thread = None
         self.alive = None
         
@@ -96,7 +95,7 @@ class SonosHttp(SmartPlugin):
             self.client.startup()
         else:
             self.logger.error(f"Settings for Webhook server incorrect. Server will not be started.")
-            # self._init_complete = False
+            self._init_complete = False
 
         # init webinterface
         if not self.init_webinterface(WebInterface):
@@ -113,15 +112,9 @@ class SonosHttp(SmartPlugin):
         self.alive = True
 
         # initialize sonos system
-        response = self.get_request('zones')
+        response = self.zones
         # self.logger.debug(f"run: zones={response}")
         self._decode_zones(response)
-
-        self.sonos_favorites = self.get_request('favorites')
-        # self.logger.debug(f"run: favorites={self.sonos_favorites}")
-
-        self.sonos_playlists = self.get_request('playlists')
-        # self.logger.debug(f"run: playlists={self.sonos_playlists}")
 
         # finally run 'get_webhook_data' in an endless loop as long as plugin is alive in an own thread
         self.webhook_startup()
@@ -225,7 +218,10 @@ class SonosHttp(SmartPlugin):
                     request = f"{_sonos_zone}/{_sonos_cmd}/{item()}"
 
                 response = self.get_request(request)
-                self.logger.debug(f"update_item: response={response}")
+                if response.get('status', None) == 'success':
+                    self.logger.debug(f"update_item: Command {_sonos_cmd } successfully sent.")
+                else:
+                    self.logger.debug(f"update_item: Command {_sonos_cmd} failed.")
 
     def get_request(self, request):
         """Create payload, send get request and return response
@@ -270,7 +266,7 @@ class SonosHttp(SmartPlugin):
                 try:
                     response = json.loads(queue_data)
                 except Exception as e:
-                    self.logger.debug(f"get_webhook_data: was not in json format, response skipped")
+                    self.logger.debug(f"get_webhook_data: was not in json format Error={e}, response skipped")
                     pass
                 else:
                     self.logger.debug(f"get_webhook_data: response={response}")
@@ -293,27 +289,27 @@ class SonosHttp(SmartPlugin):
         """Start a thread that to get Webhook data in endless loop"""
 
         try:
-            self._webhook_thread = threading.Thread(target=self.get_webhook_data)
-            self._webhook_thread.setDaemon(False)
+            self.webhook_thread = threading.Thread(target=self.get_webhook_data)
+            self.webhook_thread.setDaemon(False)
             _name = 'plugins.' + self.get_fullname() + '.SonosHttpWebhook'
-            self._webhook_thread.setName(_name)
-            self._webhook_thread.start()
+            self.webhook_thread.setName(_name)
+            self.webhook_thread.start()
         except threading.ThreadError:
             self.logger.error("Unable to launch SonosHttpWebhook thread")
-            self._webhook_thread = None
+            self.webhook_thread = None
 
     def webhook_shutdown(self):
         """Shut a thread that to get Webhook data in endless loop"""
 
-        if self._webhook_thread:
+        if self.webhook_thread:
             # terminate the thread
-            self._webhook_thread.join()
+            self.webhook_thread.join()
             # log the outcome
-            if self._webhook_thread.is_alive():
+            if self.webhook_thread.is_alive():
                 self.logger.error("Unable to shut down SonosHttpWebhook thread")
             else:
                 self.logger.info("SonosHttpWebhook thread has been terminated")
-        self._webhook_thread = None
+        self.webhook_thread = None
 
     def _update_item_value_change(self, zone, cmd, value):
         """Updates item values based on sonos zone, sonos_cmd and value"""
@@ -399,6 +395,11 @@ class SonosHttp(SmartPlugin):
 
         return dict(self.sonos_zone_uuid).get(zone, None)
 
+    def _get_zone_from_uuid(self, uuid):
+        """get zone from a uuid; uses list of tuples for [(zone1, uuid1), (zone2, uuid2), ...]"""
+
+        return {value: key for key, value in dict(self.sonos_zone_uuid).items()}.get(uuid, None)
+
     def _decode_zones(self, zones):
         """decode webhook response_type "topology-change" and hand over to _decode_state"""
 
@@ -446,7 +447,7 @@ class SonosHttp(SmartPlugin):
         roomname = data.get('roomName', None)
         mute = bool(data.get('newMute', None))
         self._update_item_value_change(roomname, 'mute', mute)
-        self._update_item_value_change(roomname, 'tooglemute', not(mute))
+        self._update_item_value_change(roomname, 'tooglemute', not mute)
 
     def _decode_volume(self, data):
         """decode webhook response_type "volume-change" and hand over to _update_item_value_change"""
@@ -454,6 +455,35 @@ class SonosHttp(SmartPlugin):
         roomname = data.get('roomName', None)
         volume = int(data.get('newVolume', None))
         self._update_item_value_change(roomname, 'volume', volume)
+
+    @property
+    def topology(self):
+        if self.sonos_topology:
+            topology_zone = {}
+            for uuid in self.sonos_topology:
+                zone = self._get_zone_from_uuid(uuid)
+                if zone not in topology_zone:
+                    topology_zone[zone] = {}
+                for entry in self.sonos_topology[uuid]:
+                    if entry == 'coordinator':
+                        topology_zone[zone][entry] = self._get_zone_from_uuid(self.sonos_topology[uuid][entry])
+                    if entry == 'members':
+                        topology_zone[zone][entry] = set()
+                        for member in self.sonos_topology[uuid][entry]:
+                            topology_zone[zone][entry].update([(self._get_zone_from_uuid(member))])
+            return topology_zone
+
+    @property
+    def favourites(self):
+        return {v+1: k for v, k in enumerate(self.get_request('favorites'))}
+
+    @property
+    def playlists(self):
+        return {v+1: k for v, k in enumerate(self.get_request('playlists'))}
+
+    @property
+    def zones(self):
+        return self.get_request('zones')
 
 
 class Consumer(object):
@@ -613,7 +643,6 @@ def is_valid_port(port):
 
 def convert_sec_to_str(seconds):
     return str(datetime.timedelta(seconds=seconds))
-
 
 
 """

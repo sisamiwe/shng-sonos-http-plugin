@@ -1,9 +1,1 @@
-threading
-queue
-http.server
-socketserver
-urllib.parse
 requests
-json
-socket
-deepdiff
