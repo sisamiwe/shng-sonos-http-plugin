@@ -177,10 +177,187 @@ item_attributes:
             - 'zonePlayMode_shuffle'    # bool
             - 'zonePlayMode_repeat'     # bool
             - 'zonePlayMode_crossfade'  # bool
-            - 'stationName'
-            - 'type'
+            - 'stationName'             # str
+            - 'type'                    # str
 
-item_structs: NONE
+item_structs:
+    system:
+        lockvolumes:
+            name: locks volumes
+            type: bool
+            sonos_global_cmd: lockvolumes
+            enforce_updates: yes
+
+        unlockvolumes:
+            name: unlocks volumes
+            type: bool
+            sonos_global_cmd: unlockvolumes
+            enforce_updates: yes
+
+        pauseall:
+            name: pause all with optional timeout in minutes
+            type: num
+            sonos_global_cmd: pauseall
+            enforce_updates: yes
+
+        resumeall:
+            name: will resume the ones that was pause on the pauseall call
+            type: bool
+            sonos_global_cmd: resumeall
+            enforce_updates: yes
+
+        reindex:
+            type: bool
+            sonos_global_cmd: reindex
+            enforce_updates: yes
+
+        sleep:
+            name: sleep for values in seconds
+            parameter: /{timeout in seconds or timestamp HH:MM:SS or off}
+            type: str
+            sonos_global_cmd: sleep
+            enforce_updates: yes
+
+        preset:
+            name: calls preset
+            paramater: /{JSON preset}, /{predefined preset name}
+            type: str
+            sonos_global_cmd: preset
+            enforce_updates: yes
+
+    sonos_zone:
+        play:
+            type: bool
+            sonos_zone_cmd: playpause
+            enforce_updates: yes
+
+        next:
+            type: bool
+            sonos_zone_cmd: next
+            enforce_updates: yes
+
+        previous:
+            type: bool
+            sonos_zone_cmd: previous
+            enforce_updates: yes
+
+        play_favorite_nr:
+            type: num
+            sonos_zone_cmd: favorite_nr
+            enforce_updates: yes
+
+        play_favorite:
+            type: str
+            sonos_zone_cmd: favorite
+            enforce_updates: yes
+
+        mute:
+            type: bool
+            sonos_zone_cmd: togglemute
+            enforce_updates: yes
+
+        volume:
+            type: num
+            sonos_zone_cmd: volume
+
+        volume_up:
+            type: bool
+            sonos_zone_cmd: volume_up
+            enforce_updates: yes
+
+        volume_down:
+            type: bool
+            sonos_zone_cmd: volume_down
+            enforce_updates: yes
+
+        say:
+            type: str
+            sonos_zone_cmd: say
+            enforce_updates: yes
+
+        streamtype:
+            type: str
+            sonos_zone_info: type
+
+        station_name:
+            type: str
+            sonos_zone_info: stationName
+
+        current_artist:
+            type: str
+            sonos_zone_info: current_artist
+
+        current_title:
+            type: str
+            sonos_zone_info: current_title
+
+        current_album:
+            type: str
+            sonos_zone_info: current_album
+
+        current_duration:
+            type: num
+            sonos_zone_info: current_duration
+
+        current_duration_str:
+            type: str
+            sonos_zone_info: current_duration_str
+
+        next_artist:
+            type: str
+            sonos_zone_info: next_artist
+
+        next_title:
+            type: str
+            sonos_zone_info: next_title
+
+        next_album:
+            type: str
+            sonos_zone_info: next_album
+
+        next_duration:
+            type: str
+            sonos_zone_info: next_duration_str
+
+        track_nr:
+            type: num
+            sonos_zone_info: trackNo
+
+            # elapsed_time:
+            # type: num
+            # sonos_zone_info: elapsedTime
+
+            # elapsed_time_str:
+            # type: str
+            # sonos_zone_info: elapsedTimeFormatted
+
+        zone_state:
+            type: str
+            sonos_zone_info: zoneState
+
+        setting:
+            bass:
+                type: num
+                sonos_zone_cmd: bass
+
+            treble:
+                type: num
+                sonos_zone_cmd: treble
+
+            loudness:
+                type: bool
+                sonos_zone_cmd: loudness
+                enforce_updates: yes
+
+            join:
+                type: str
+                sonos_zone_cmd: join
+                enforce_updates: yes
+
+            leave:
+                type: str
+                sonos_zone_cmd: leave
+                enforce_updates: yes
 
 item_attribute_prefixes: NONE
 

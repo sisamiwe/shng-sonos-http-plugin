@@ -63,15 +63,24 @@ class SonosHttp(SmartPlugin):
         super().__init__()
 
         # get the parameters for the plugin (as defined in metadata plugin.yaml):
-        self._sonos_http_api_host = self.get_parameter_value('Sonos_HTTP_API_Host') if self.get_parameter_value('Sonos_HTTP_API_Host') != '127.0.0.1' else Utils.get_local_ipv4_address()
-        self._sonos_http_api_port = self.get_parameter_value('Sonos_HTTP_API_Port') if is_valid_port(self.get_parameter_value('Sonos_HTTP_API_Port')) else None
+        self._sonos_http_api_host = self.get_parameter_value('Sonos_HTTP_API_Host')
+        if self._sonos_http_api_host == '127.0.0.1':
+            self._sonos_http_api_host = Utils.get_local_ipv4_address()
+
+        self._sonos_http_api_port = self.get_parameter_value('Sonos_HTTP_API_Port')
+        if not is_valid_port(self._sonos_http_api_port):
+            self._sonos_http_api_port = None
+
         self._tts_language = self.get_parameter_value('Sprache')
 
         if not self._sonos_http_api_host or not self._sonos_http_api_port:
             self.logger.error(f"Settings for Sonos-HTTP-API-Host incorrect. Plugin will not be started.")
             self._init_complete = False
                     
-        self._http_server_ip = self.get_parameter_value('Server_IP') if self.get_parameter_value('Server_IP') != '127.0.0.1' else Utils.get_local_ipv4_address()
+        self._http_server_ip = self.get_parameter_value('Server_IP')
+        if self._http_server_ip == '127.0.0.1':
+            self._http_server_ip = Utils.get_local_ipv4_address()
+
         _http_server_port = self.get_parameter_value('Server_Port')
         if is_valid_port(_http_server_port):
             if is_open_port(_http_server_port):
@@ -86,8 +95,8 @@ class SonosHttp(SmartPlugin):
         self.sonos_topology = {}                    # dict for topology {uuid1 {'coordinator': 'RINCON_******', 'members': {'RINCON_******'}}, uuid2....
         self.sonos_favorites = []                   # list holding sonos favourites
         self.sonos_playlists = []                   # list holding sonos playlists
-        self.webhook_thread = None
-        self.alive = None
+        self.webhook_thread = None                  # thread of webhook
+        self.alive = None                           # alive property
         
         # init HttpServer
         if self._http_server_ip and self._http_server_port:
@@ -112,9 +121,7 @@ class SonosHttp(SmartPlugin):
         self.alive = True
 
         # initialize sonos system
-        response = self.zones
-        # self.logger.debug(f"run: zones={response}")
-        self._decode_zones(response)
+        self._get_zones()
 
         # finally run 'get_webhook_data' in an endless loop as long as plugin is alive in an own thread
         self.webhook_startup()
@@ -213,15 +220,29 @@ class SonosHttp(SmartPlugin):
                 elif 'say' in _sonos_cmd:
                     request = f"{_sonos_zone}/{_sonos_cmd}/{urlparse.quote(item())}/{self._tts_language}"
                 elif _sonos_cmd == 'favorite_nr':
-                    request = f"{_sonos_zone}/favorite/{self.sonos_favorites[item()-1]}"
+                    self._get_favourites()
+                    if item()-1 <= len(self.sonos_favorites):
+                        request = f"{_sonos_zone}/favorite/{self.sonos_favorites[item()-1]}"
+                    else:
+                        request = None
+                        self.logger.warning(f"favorite_nr: unknown favourite")
+                elif _sonos_cmd in ['join', 'leave']:
+                    if item() in self.sonos_topology:
+                        request = f"{_sonos_zone}/{_sonos_cmd}/{item()}"
+                    else:
+                        request = None
                 else:
                     request = f"{_sonos_zone}/{_sonos_cmd}/{item()}"
 
                 response = self.get_request(request)
-                if response.get('status', None) == 'success':
-                    self.logger.debug(f"update_item: Command {_sonos_cmd } successfully sent.")
+
+                if isinstance(response, dict):
+                    if response.get('status', None) == 'success':
+                        self.logger.debug(f"update_item: Command {_sonos_cmd } successfully sent.")
+                    else:
+                        self.logger.debug(f"update_item: Command {_sonos_cmd} failed.")
                 else:
-                    self.logger.debug(f"update_item: Command {_sonos_cmd} failed.")
+                    self.logger.debug(f"update_item: Command {_sonos_cmd} failed. No response")
 
     def get_request(self, request):
         """Create payload, send get request and return response
@@ -456,6 +477,18 @@ class SonosHttp(SmartPlugin):
         volume = int(data.get('newVolume', None))
         self._update_item_value_change(roomname, 'volume', volume)
 
+    def _get_zones(self):
+        self.logger.debug("_get_zones: called")
+        self._decode_zones(self.get_request('zones'))
+
+    def _get_favourites(self):
+        self.logger.debug("_get_favourites: called")
+        self.sonos_favorites = self.get_request('favorites')
+
+    def _get_playlists(self):
+        self.logger.debug("_get_playlists: called")
+        self.sonos_playlists = self.get_request('playlists')
+
     @property
     def topology(self):
         if self.sonos_topology:
@@ -475,15 +508,25 @@ class SonosHttp(SmartPlugin):
 
     @property
     def favourites(self):
-        return {v+1: k for v, k in enumerate(self.get_request('favorites'))}
+        self._get_favourites()
+        return {v+1: k for v, k in enumerate(self.sonos_favorites)}
 
     @property
     def playlists(self):
-        return {v+1: k for v, k in enumerate(self.get_request('playlists'))}
+        self._get_playlists()
+        return {v+1: k for v, k in enumerate(self.sonos_playlists)}
 
     @property
     def zones(self):
         return self.get_request('zones')
+
+    @property
+    def uuid_list(self):
+        return list(dict(self.sonos_zone_uuid).values())
+
+    @property
+    def zone_list(self):
+        return list(dict(self.sonos_zone_uuid).keys())
 
 
 class Consumer(object):
@@ -621,7 +664,7 @@ class HttpServer(Consumer):
             Consumer.queue.put(data)
 
 ####################################################################################
-#                                Utility Fuctions
+#                                Utility Functions
 ####################################################################################
 
 

@@ -25,10 +25,6 @@
 #
 #########################################################################
 
-import datetime
-import time
-import os
-
 from lib.item import Items
 from lib.model.smartplugin import SmartPluginWebIf
 
@@ -60,7 +56,6 @@ class WebInterface(SmartPluginWebIf):
 
         self.tplenv = self.init_template_environment()
 
-
     @cherrypy.expose
     def index(self, reload=None):
         """
@@ -75,7 +70,6 @@ class WebInterface(SmartPluginWebIf):
         return tmpl.render(p=self.plugin,
                            items=sorted(self.items.return_items(), key=lambda k: str.lower(k['_path'])),
                            item_count=0)
-
 
     @cherrypy.expose
     def get_data_html(self, dataSet=None):
@@ -101,4 +95,19 @@ class WebInterface(SmartPluginWebIf):
             # except Exception as e:
             #     self.logger.error("get_data_html exception: {}".format(e))
         return {}
+
+    @cherrypy.expose
+    def get_zones(self):
+        self.logger.debug(f"get_zones called")
+        self.plugin._get_zones()
+
+    # @cherrypy.expose
+    # def get_playlists(self):
+    #     self.logger.debug(f"get_playlists called")
+    #     self.plugin._get_zones()
+    #
+    # @cherrypy.expose
+    # def get_favourites(self):
+    #     self.logger.debug(f"get_favourites called")
+    #     self.plugin._get_zones()
 

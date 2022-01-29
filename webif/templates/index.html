@@ -54,7 +54,7 @@
 	<tbody>
 		<tr>
 			<td class="py-1"><strong>Sonos HTTP API Host</strong></td>
-			<td class="py-1">{{ p._sonos_http_api_host }}}</td>
+			<td class="py-1">{{ p._sonos_http_api_host }}</td>
 			<td class="py-1" width="50px"></td>
 			<td class="py-1"><strong>Sonos HTTP API Port</strong></td>
 			<td class="py-1">{{ p._sonos_http_api_port }}</td>
@@ -86,11 +86,13 @@
 	Additional buttons for the web interface (if any are needed) - displayed below the headtable-section
 -->
 {% block buttons %}
-{% if 1==2 %}
-	<div>
-		<button id="btn1" class="btn btn-shng btn-sm" name="scan" onclick="shngPost('', {learn: 'on'})"><i class="fas fa-question"></i>&nbsp;&nbsp;&nbsp;{{ _('nach Devices suchen') }}&nbsp;</button>
+    <div>
+        <button type="button" class="btn btn-shng btn-sm" onclick="if (confirm('{{ _('Update des Sonos-Systems?') }}')) { jQuery.get('get_zones'); }">{{_('Update Zones')}}</button>
+		<!--
+		<button type="button" class="btn btn-shng btn-sm" onclick="if (confirm('{{ _('Update Playlists?') }}')) { jQuery.get('get_playlists'); }">{{_('Update Playlists')}}</button>
+		<button type="button" class="btn btn-shng btn-sm" onclick="if (confirm('{{ _('Update Favourites?') }}')) { jQuery.get('get_favourites'); }">{{_('Update Favourites')}}</button>
+		-->
 	</div>
-{% endif %}
 {% endblock %}
 
 <!--
@@ -118,7 +120,8 @@
 			<tr>
                 <th>{{_('Item')}}</th>
                 <th>{{_('Typ')}}</th>
-                <th>{{_('Sonos Attribute')}}</th>
+                <th>{{_('Zone')}}</th>
+				<th>{{_('Attribute')}}</th>
                 <th>{{_('Wert')}}</th>
                 <th>{{_('Letztes Update')}}</th>
                 <th>{{_('Letzter Change')}}</th>
@@ -130,6 +133,7 @@
                     <td class="py-1">{{ item._path }}</td>
                     <td class="py-1">{{ item._type }}</td>
                     <td class="py-1">{{ p._item_dict[item][0] }}</td>
+					<td class="py-1">{{ p._item_dict[item][1] }}</td>
                     <td class="py-1">{{ item._value }}</td>
                     <td class="py-1">{{ item.property.last_update.strftime('%d.%m.%Y %H:%M:%S') }}</td>
                     <td class="py-1">{{ item.property.last_change.strftime('%d.%m.%Y %H:%M:%S') }}</td>
@@ -178,6 +182,14 @@
 			<tr>
                 <td class="py-1">{{ _('sonos_playlists') }}</td>
                 <td class="py-1">{{ p.playlists}}</td>
+            </tr>
+			<tr>
+                <td class="py-1">{{ _('zone_list') }}</td>
+                <td class="py-1">{{ p.zone_list}}</td>
+            </tr>
+			<tr>
+                <td class="py-1">{{ _('uuid_list') }}</td>
+                <td class="py-1">{{ p.uuid_list}}</td>
             </tr>
 		</tbody>
 	</table>
