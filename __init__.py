@@ -156,13 +156,13 @@ class SonosHttp(SmartPlugin):
 
         if self.has_iattr(item.conf, 'sonos_zone_cmd'):
             # self.logger.debug(f"parse item: {item.id()}")
-            _sonos_zone_cmd = str(self.get_iattr_value(item.conf, 'sonos_zone_cmd'))
+            _sonos_zone_cmd = str(self.get_iattr_value(item.conf, 'sonos_zone_cmd')).lower()
         elif self.has_iattr(item.conf, 'sonos_zone_info'):
             # self.logger.debug(f"parse item: {item.id()}")
-            _sonos_zone_info = str(self.get_iattr_value(item.conf, 'sonos_zone_info'))
+            _sonos_zone_info = str(self.get_iattr_value(item.conf, 'sonos_zone_info')).lower()
         elif self.has_iattr(item.conf, 'sonos_global_cmd'):
             # self.logger.debug(f"parse item: {item.id()}")
-            _sonos_global_cmd = str(self.get_iattr_value(item.conf, 'sonos_global_cmd'))
+            _sonos_global_cmd = str(self.get_iattr_value(item.conf, 'sonos_global_cmd')).lower()
 
         if _sonos_global_cmd:
             self._item_dict[item] = (None, _sonos_global_cmd)
@@ -219,6 +219,11 @@ class SonosHttp(SmartPlugin):
                     request = f"{_sonos_zone}/{_sonos_cmd}"
                 elif 'say' in _sonos_cmd:
                     request = f"{_sonos_zone}/{_sonos_cmd}/{urlparse.quote(item())}/{self._tts_language}"
+                elif 'tunein' in _sonos_cmd:
+                    station_id = item().lower()
+                    if station_id.startswith('s'):
+                        station_id = station_id[1:]
+                    request = f"{_sonos_zone}/{_sonos_cmd}/play/{station_id}"
                 elif _sonos_cmd == 'favorite_nr':
                     self._get_favourites()
                     if item()-1 <= len(self.sonos_favorites):
@@ -358,6 +363,7 @@ class SonosHttp(SmartPlugin):
                 if sonos_zone_data is not None:
                     sonos_zone_data_state = sonos_zone_data.get('state', None)
                     if sonos_zone_data_state is not None:
+
                         if _sonos_cmd.startswith('current_'):
                             current_track = sonos_zone_data_state.get('currentTrack', None)
                             if current_track is not None:
@@ -369,6 +375,7 @@ class SonosHttp(SmartPlugin):
                                 else:
                                     if cmd == 'duration' and _sonos_cmd.endswith('_str'):
                                         _value = convert_sec_to_str(_value)
+
                         elif _sonos_cmd.startswith('next_'):
                             next_track = sonos_zone_data_state.get('nextTrack', None)
                             if next_track is not None:
@@ -380,17 +387,20 @@ class SonosHttp(SmartPlugin):
                                 else:
                                     if cmd == 'duration' and _sonos_cmd.endswith('_str'):
                                         _value = convert_sec_to_str(_value)
+
                         elif _sonos_cmd in ['play', 'playpause']:
                             playback_state = sonos_zone_data_state.get('playbackState', None)
                             if playback_state == 'STOPPED':
                                 _value = False
                             else:
                                 _value = True
+
                         else:
                             if _sonos_cmd in ['togglemute']:
                                 _sonos_cmd = 'mute'
 
                             _value = self._recursive_lookup(_sonos_cmd, sonos_zone_data)
+                            # self.logger.debug(f"_sonos_zone={_sonos_zone}, _sonos_cmd={_sonos_cmd}, _value={_value}")
 
                         if _value is not None:
                             item(_value, self.get_shortname(), _sonos_cmd)
@@ -425,7 +435,7 @@ class SonosHttp(SmartPlugin):
         """decode webhook response_type "topology-change" and hand over to _decode_state"""
 
         if zones is not None:
-            # get all zones and uuids
+            # get zones and uuids
             for entry in zones:
                 members = entry['members']
                 for member in members:
