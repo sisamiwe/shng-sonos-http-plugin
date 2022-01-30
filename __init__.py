@@ -48,7 +48,7 @@ class SonosHttp(SmartPlugin):
 
     def __init__(self, sh):
         """
-        Initalizes the plugin.
+        Initializes the plugin.
 
         If you need the sh object at all, use the method self.get_sh() to get it. There should be almost no need for
         a reference to the sh object any more.
@@ -179,11 +179,11 @@ class SonosHttp(SmartPlugin):
 
             if _sonos_zone_cmd and _sonos_zone is not None:
                 self._item_dict[item] = (_sonos_zone, _sonos_zone_cmd)
-                # self.logger.debug(f"Item with attribut 'sonos_zone_cmd'={_sonos_zone_cmd} for zone='{_sonos_zone}' added")
+                # self.logger.debug(f"Item with attribute 'sonos_zone_cmd'={_sonos_zone_cmd} for zone='{_sonos_zone}' added")
                 return self.update_item        
                 
             if _sonos_zone_info and _sonos_zone is not None:
-                # self.logger.debug(f"Item with attribut 'sonos_zone_info'={_sonos_zone_info} for zone='{_sonos_zone}' added")
+                # self.logger.debug(f"Item with attribute 'sonos_zone_info'={_sonos_zone_info} for zone='{_sonos_zone}' added")
                 self._item_dict[item] = (_sonos_zone, _sonos_zone_info)
 
     def update_item(self, item, caller=None, source=None, dest=None):
@@ -268,7 +268,7 @@ class SonosHttp(SmartPlugin):
             self.logger.error(f"get_request: request={request} failed with Error {e}")
         else:
             if r.status_code == requests.codes.ok:
-                # self.logger.error(f"get_request: request={request} sucessful")
+                # self.logger.error(f"get_request: request={request} successful")
                 response = json.loads(r.text)
                 # self.logger.error(f"json={response}")
                 # self.logger.debug(f"json={json.dumps(d, indent=4, sort_keys=True)}")
