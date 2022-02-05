@@ -67,9 +67,21 @@ class WebInterface(SmartPluginWebIf):
         """
         tmpl = self.tplenv.get_template('index.html')
         # add values to be passed to the Jinja2 template eg: tmpl.render(p=self.plugin, interface=interface, ...)
-        return tmpl.render(p=self.plugin,
-                           items=sorted(self.items.return_items(), key=lambda k: str.lower(k['_path'])),
-                           item_count=0)
+        return tmpl.render(p=self.plugin)
+
+        # get list of items with the attribute knx_dpt
+        plgitems = []
+        for item in self.items.return_items():
+            if 'sonos_global_cmd' in item.conf:
+                plgitems.append(item)
+            elif 'sonos_zone_cmd' in item.conf:
+                plgitems.append(item)
+            elif 'sonos_zone_info' in item.conf:
+                plgitems.append(item)
+
+        # additionally hand over the list of items, sorted by item-path
+        tmpl = self.tplenv.get_template('index.html')
+        return tmpl.render(p=self.plugin, items=sorted(plgitems, key=lambda k: str.lower(k['_path'])),)
 
     @cherrypy.expose
     def get_data_html(self, dataSet=None):
@@ -110,4 +122,3 @@ class WebInterface(SmartPluginWebIf):
     # def get_favourites(self):
     #     self.logger.debug(f"get_favourites called")
     #     self.plugin._get_zones()
-
