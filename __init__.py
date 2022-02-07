@@ -117,6 +117,7 @@ class SonosHttp(SmartPlugin):
         """
         Run method for the plugin
         """
+
         # self.logger.debug(f"{self.get_shortname()}: Run method called")
         self.alive = True
 
@@ -130,6 +131,7 @@ class SonosHttp(SmartPlugin):
         """
         Stop method for the plugin
         """
+
         self.logger.debug(f"{self.get_shortname()}: Stop method called")
         self.alive = False
         self.client.stop_server()
@@ -149,6 +151,7 @@ class SonosHttp(SmartPlugin):
                         with the item, caller, source and dest as arguments and in case of the knx plugin the value
                         can be sent to the knx with a knx write function within the knx plugin.
         """
+
         _sonos_global_cmd = None
         _sonos_zone_cmd = None
         _sonos_zone_info = None
@@ -199,6 +202,7 @@ class SonosHttp(SmartPlugin):
         :param source: if given it represents the source
         :param dest: if given it represents the dest
         """
+
         if self.alive and caller != self.get_shortname():
             # code to execute if the plugin is not stopped and only, if the item has not been changed by this this plugin:
             self.logger.info(f"Update item: {item.property.path}, item has been changed outside this plugin")
@@ -250,11 +254,16 @@ class SonosHttp(SmartPlugin):
                     self.logger.debug(f"update_item: Command {_sonos_cmd} failed. No response")
 
     def get_request(self, request):
-        """Create payload, send get request and return response
-
+        """
+        Create payload, send get request and return response
             in case of no failure it returns the response
             in case of failure it returns None
 
+        :param request: Cmd which should be requested
+        :type request: str
+
+        :return: response
+        :rtype: str / None
         """
 
         # self.logger.debug(f"get_request: request={request}")
@@ -278,7 +287,9 @@ class SonosHttp(SmartPlugin):
                 return
 
     def get_webhook_data(self):
-        """get data from queue of server listening on webhook and hand over to decode"""
+        """
+        Get data from queue of server listening on webhook and hand over to decode
+        """
         
         while self.alive:
             try:
@@ -312,7 +323,9 @@ class SonosHttp(SmartPlugin):
                         self._decode_mute(response['data'])
 
     def webhook_startup(self):
-        """Start a thread that to get Webhook data in endless loop"""
+        """
+        Start a thread that to get Webhook data in endless loop
+        """
 
         try:
             self.webhook_thread = threading.Thread(target=self.get_webhook_data)
@@ -325,7 +338,9 @@ class SonosHttp(SmartPlugin):
             self.webhook_thread = None
 
     def webhook_shutdown(self):
-        """Shut a thread that to get Webhook data in endless loop"""
+        """
+        Shut a thread that to get Webhook data in endless loop
+        """
 
         if self.webhook_thread:
             # terminate the thread
@@ -338,7 +353,16 @@ class SonosHttp(SmartPlugin):
         self.webhook_thread = None
 
     def _update_item_value_change(self, zone, cmd, value):
-        """Updates item values based on sonos zone, sonos_cmd and value"""
+        """
+        Updates item values based on sonos zone, sonos_cmd and value
+
+        :param zone: Zone for which the update should be done
+        :type zone: str
+        :param cmd: cmd what has changed
+        :type cmd: str
+        :param value: new value
+        :type value: foo
+        """
     
         for item in self._item_dict:
             _sonos_zone = self._item_dict[item][0]
@@ -348,7 +372,12 @@ class SonosHttp(SmartPlugin):
                 item(value, self.get_shortname(), _sonos_cmd)
 
     def _update_item_value_state(self, zone):
-        """Updates item values based on state dict of sonos zone"""
+        """
+        Updates item values based on state dict of sonos zone
+
+        :param zone: Zone for which the update should be done
+        :type zone: str
+        """
 
         # self.logger.debug(f"_update_item_value_state called for zone {zone}")
 
@@ -370,7 +399,7 @@ class SonosHttp(SmartPlugin):
                                 cmd = _sonos_cmd.split('_')[1]
                                 try:
                                     _value = current_track[cmd]
-                                except:
+                                except Exception:
                                     pass
                                 else:
                                     if cmd == 'duration' and _sonos_cmd.endswith('_str'):
@@ -382,7 +411,7 @@ class SonosHttp(SmartPlugin):
                                 cmd = _sonos_cmd.split('_')[1]
                                 try:
                                     _value = next_track[cmd]
-                                except:
+                                except Exception:
                                     pass
                                 else:
                                     if cmd == 'duration' and _sonos_cmd.endswith('_str'):
@@ -410,7 +439,17 @@ class SonosHttp(SmartPlugin):
                     self.logger.warning(f"no 'sonos_zone_data' data")
 
     def _recursive_lookup(self, k, d):
-        """searched for key k in nested dict d and returns value of k if found and None of key k is not on nested dict"""
+        """
+        Search for key k in nested dict d and returns value of k if found and None of key k is not on nested dict
+
+        :param k: Key should should be searched for
+        :type k: str
+        :param d: Dict to be searched
+        :type d: dict
+
+        :return: value
+        :rtype: foo
+        """
         
         if k in d:
             return d[k]
@@ -422,17 +461,38 @@ class SonosHttp(SmartPlugin):
         return None
 
     def _get_uuid_from_zone(self, zone):
-        """get uuid from a zone; uses list of tuples for [(zone1, uuid1), (zone2, uuid2), ...]"""
+        """
+        Get uuid from a zone; uses list of tuples for [(zone1, uuid1), (zone2, uuid2), ...]
+
+        :param zone: Zone name
+        :type zone: str
+
+        :return: UUID
+        :rtype: str
+        """
 
         return dict(self.sonos_zone_uuid).get(zone, None)
 
     def _get_zone_from_uuid(self, uuid):
-        """get zone from a uuid; uses list of tuples for [(zone1, uuid1), (zone2, uuid2), ...]"""
+        """
+        Get zone from a uuid; uses list of tuples for [(zone1, uuid1), (zone2, uuid2), ...]
+
+        :param uuid: UUID
+        :type uuid: str
+
+        :return: zone name
+        :rtype: str
+        """
 
         return {value: key for key, value in dict(self.sonos_zone_uuid).items()}.get(uuid, None)
 
     def _decode_zones(self, zones):
-        """decode webhook response_type "topology-change" and hand over to _decode_state"""
+        """
+        Decode webhook response_type "topology-change" and hand over to _decode_state
+
+        :param zones: Data to be decoded
+        :type zones: dict
+        """
 
         if zones is not None:
             # get zones and uuids
@@ -458,7 +518,12 @@ class SonosHttp(SmartPlugin):
             self.logger.warning(f"_decode_zones: Input was {zones}; get request might have been not succesfull")
 
     def _decode_state(self, data):
-        """decode webhook response_type "transport-state" and hand over to _update_item_value_state"""
+        """
+        Decode webhook response_type "transport-state" and hand over to _update_item_value_state
+
+        :param data: Data to be decoded
+        :type data: dict
+        """
 
         zone_name = data.get('roomName', None)
 
@@ -473,7 +538,12 @@ class SonosHttp(SmartPlugin):
         self._update_item_value_state(zone_name)
 
     def _decode_mute(self, data):
-        """decode webhook response_type "mute-change" and hand over to _update_item_value_change"""
+        """
+        Decode webhook response_type "mute-change" and hand over to _update_item_value_change
+
+        :param data: Data to be decoded
+        :type data: dict
+        """
     
         roomname = data.get('roomName', None)
         mute = bool(data.get('newMute', None))
@@ -481,21 +551,38 @@ class SonosHttp(SmartPlugin):
         self._update_item_value_change(roomname, 'tooglemute', not mute)
 
     def _decode_volume(self, data):
-        """decode webhook response_type "volume-change" and hand over to _update_item_value_change"""
+        """
+        Decode webhook response_type "volume-change" and hand over to _update_item_value_change
+
+        :param data: Data to be decoded
+        :type data: dict
+        """
         
         roomname = data.get('roomName', None)
         volume = int(data.get('newVolume', None))
         self._update_item_value_change(roomname, 'volume', volume)
 
     def _get_zones(self):
+        """
+        Request Zone info
+        """
+
         self.logger.debug("_get_zones: called")
         self._decode_zones(self.get_request('zones'))
 
     def _get_favourites(self):
+        """
+        Request Favourites info
+        """
+
         self.logger.debug("_get_favourites: called")
         self.sonos_favorites = self.get_request('favorites')
 
     def _get_playlists(self):
+        """
+        Request Playlists info
+        """
+
         self.logger.debug("_get_playlists: called")
         self.sonos_playlists = self.get_request('playlists')
 
@@ -540,7 +627,9 @@ class SonosHttp(SmartPlugin):
 
 
 class Consumer(object):
-    """The Consumer contains two primary parts - a Server and a Parser."""
+    """
+    The Consumer contains two primary parts - a Server and a Parser.
+    """
 
     queue = queue.Queue()
 
@@ -556,37 +645,63 @@ class Consumer(object):
         pass
 
     def get_queue(self):
+        """
+        Returns queue
+        """
+
         return Consumer.queue
 
 
 class HttpServer(Consumer):
-    """Create HTTP Server to get Webhook Data"""
+    """
+    Create HTTP Server to get Webhook Data
+    """
 
     def __init__(self, tcp_server_address, tcp_server_port, plugin_instance):
+        """
+        Init SonosHttpServer.
+
+        :param tcp_server_address: IP address where the http server should be established
+        :type tcp_server_address: ip
+        :param tcp_server_port: Port where the http server should be reachable
+        :type tcp_server_address: int
+        :param plugin_instance: Instance of plugin
+        """
 
         # now initialize my superclasses
-        super(HttpServer, self).__init__(plugin_instance)
+        super().__init__(plugin_instance)
 
         # init instance
         self._plugin_instance = plugin_instance
 
-        self._server_thread = None
-
         # log the relevant settings/parameters we are using
         self._plugin_instance.logger.debug("Starting SonosHttpServer")
+
+        # define properties
+        self._server_thread = None
 
         # init tcp server
         self._server = HttpServer.TCPServer(tcp_server_address, tcp_server_port, HttpServer.Handler, plugin_instance)
 
     def run_server(self):
+        """
+        Run SonosHttpServer.
+        """
+
         self._server.run()
 
     def stop_server(self):
+        """
+        Stop SonosHttpServer.
+        """
+
         self._server.stop()
         self._server = None
 
     def startup(self):
-        """Start a thread for SonosHttpServer."""
+        """
+        Start a thread for SonosHttpServer.
+        """
 
         try:
             self._server_thread = threading.Thread(target=self.run_server)
@@ -599,7 +714,9 @@ class HttpServer(Consumer):
             self._server_thread = None
 
     def shutdown(self):
-        """Shut down the thread for SonosHttpServer"""
+        """
+        Shut down the thread for SonosHttpServer
+        """
 
         if self._server_thread:
             # terminate the thread
@@ -679,6 +796,16 @@ class HttpServer(Consumer):
 
 
 def is_open_port(port):
+    """
+    Check if port is open
+
+    :param port: port number to be checked
+    :type port: int
+
+    :return: is port open
+    :rtype: bool
+    """
+
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         s.bind(("127.0.0.1", port))
@@ -688,6 +815,16 @@ def is_open_port(port):
 
 
 def is_valid_port(port):
+    """
+    Check if port is valid
+
+    :param port: port number to be checked
+    :type port: int
+
+    :return: is port valid
+    :rtype: bool
+    """
+
     if 1 <= port <= 65535:
         return True
     else:
@@ -695,6 +832,16 @@ def is_valid_port(port):
 
 
 def convert_sec_to_str(seconds):
+    """
+        Converts seconds to string
+
+        :param seconds: secondes
+        :type seconds: int
+
+        :return: seconds as str
+        :rtype: str
+        """
+
     return str(datetime.timedelta(seconds=seconds))
 
 
