@@ -1,24 +1,42 @@
 {% extends "base_plugin.html" %}
-
 {% set logo_frame = false %}
+{% set update_interval = 2000 %}
 
-<!-- set update_interval to a value > 0 (in milliseconds) to enable periodic data updates -->
-{% set update_interval = 0 %}
+{% block pluginstyles %}
+<style>
+  table th.value {
+    width: 100px;
+  }
+  #maintable {
+     display: none;
+  }
+</style>
+{% endblock pluginstyles %}
 
-<!--
-	Additional script tag for plugin specific javascript code go into this block
--->
 {% block pluginscripts %}
+<script>
+	$(document).ready( function () {
+		$(window).trigger('datatables_defaults');
+		try {
+      webif_pagelength = document.getElementById('webif_pagelength').innerHTML;
+			table = $('#maintable').DataTable( { "pageLength": webif_pagelength } );
+			}
+		catch (e) {
+			console.log("Datatable JS not loaded, showing standard table without reorder option " + e)
+			}
+		});
+</script>
+
 <script>
 	function handleUpdatedData(response, dataSet=null) {
 		if (dataSet === 'devices_info' || dataSet === null) {
 			var objResponse = JSON.parse(response);
 			myProto = document.getElementById(dataSet);
-			for (var device in objResponse) {
-				/*
-				shngInsertText (device+'_source', objResponse[device]['source']);
-				shngInsertText (device+'_powerState', objResponse[device]['powerState']);
-				*/
+			
+            for (var item in objResponse) {
+				shngInsertText (item+'_value', objResponse[item]['value'], 'maintable');
+				shngInsertText (item+'_last_update', objResponse[item]['last_update'], 'maintable');
+				shngInsertText (item+'_last_change', objResponse[item]['last_change'], 'maintable');
 			}
 		}
 	}
@@ -27,18 +45,7 @@
 	This part is used to implement datatable JS for the tables. It allows resorting tables by column, etc.
 	For each table you have to implement the code part $('#<table_id>').DataTable(..); where the <table_id> matches the id of a table tag
 -->
-<script>
-	$(document).ready( function () {
-		$(window).trigger('datatables_defaults'); // loading default behaviour
-		try {
-			$('#maintable').DataTable( {"paging": false, fixedHeader: true} );
-            $('#itemtable').DataTable( {"paging": false, fixedHeader: true} );
-			}
-		catch (e) {
-			console.log("Datatable JS not loaded, showing standard table without reorder option " + e)
-			}
-		});
-</script>
+
 {% endblock pluginscripts %}
 
 
@@ -102,12 +109,12 @@
 {% endif %}
 
 
-<!--
-	Content block for the first tab of the Webinterface
--->
 {% set tab1title = "<strong>" ~ p.get_shortname() ~ " Items</strong> " %}
 {% block bodytab1 %}
 <div class="table-responsive" style="margin-left: 3px; margin-right: 3px;" class="row">
+    <div class="mb-2">
+        <span id='webif_pagelength' style="display:none">{{ webif_pagelength }}</span>
+    </div>
     <div class="col-sm-12">
 		<table id="maintable" class="table table-striped table-hover pluginList">
 			<thead>
@@ -123,14 +130,15 @@
 			</thead>
 			<tbody>
 				{% for item in p._item_dict %}
+                    {% set item_id = item.id() %}
 					<tr>
 						<td class="py-1">{{ item._path }}</td>
 						<td class="py-1">{{ item._type }}</td>
 						<td class="py-1">{{ p._item_dict[item][0] }}</td>
 						<td class="py-1">{{ p._item_dict[item][1] }}</td>
-						<td class="py-1">{{ item._value }}</td>
-						<td class="py-1">{{ item.property.last_update.strftime('%d.%m.%Y %H:%M:%S') }}</td>
-						<td class="py-1">{{ item.property.last_change.strftime('%d.%m.%Y %H:%M:%S') }}</td>
+						<td class="py-1" id="{{ item_id }}_value">{{ item._value }}</td>
+						<td class="py-1" id="{{ item_id }}_last_update">{{ item.property.last_update.strftime('%d.%m.%Y %H:%M:%S') }}</td>
+						<td class="py-1" id="{{ item_id }}_last_change">{{ item.property.last_change.strftime('%d.%m.%Y %H:%M:%S') }}{{_('.')}}</td>
 					</tr>
 				{% endfor %}
 			</tbody>
@@ -140,9 +148,6 @@
 {% endblock bodytab1 %}
 
 
-<!--
-	Content block for the second tab of the Webinterface
--->
 {% set tab2title = "<strong>" ~ p.get_shortname() ~ " Maintenance</strong>" %}
 {% block bodytab2 %}
 <div class="table-responsive" style="margin-left: 3px; margin-right: 3px;" class="row">

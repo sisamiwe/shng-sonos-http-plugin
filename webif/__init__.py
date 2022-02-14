@@ -72,13 +72,8 @@ class WebInterface(SmartPluginWebIf):
         # return tmpl.render(p=self.plugin)
 
         # get list of items with the attribute knx_dpt
-        for item in self.items.return_items():
-            if 'sonos_global_cmd' in item.conf:
-                self.plgitems.append(item)
-            elif 'sonos_zone_cmd' in item.conf:
-                self.plgitems.append(item)
-            elif 'sonos_zone_info' in item.conf:
-                self.plgitems.append(item)
+        for item in self.plugin._item_dict:
+            self.plgitems.append(item)
 
         # additionally hand over the list of items, sorted by item-path
         tmpl = self.tplenv.get_template('index.html')
@@ -107,7 +102,7 @@ class WebInterface(SmartPluginWebIf):
                 data[item.id()]['last_change'] = item.property.last_change.strftime('%d.%m.%Y %H:%M:%S')
 
             try:
-                return json.dumps(data)
+                return json.dumps(data, default=str)
             except Exception as e:
                 self.logger.error(f"get_data_html exception: {e}")
         return {}
