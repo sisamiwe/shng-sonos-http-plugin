@@ -27,6 +27,7 @@
 
 from lib.item import Items
 from lib.model.smartplugin import SmartPluginWebIf
+import json
 
 
 # ------------------------------------------
@@ -53,6 +54,7 @@ class WebInterface(SmartPluginWebIf):
         self.webif_dir = webif_dir
         self.plugin = plugin
         self.items = Items.get_instance()
+        self.plgitems = []
 
         self.tplenv = self.init_template_environment()
 
@@ -70,18 +72,20 @@ class WebInterface(SmartPluginWebIf):
         # return tmpl.render(p=self.plugin)
 
         # get list of items with the attribute knx_dpt
-        plgitems = []
         for item in self.items.return_items():
             if 'sonos_global_cmd' in item.conf:
-                plgitems.append(item)
+                self.plgitems.append(item)
             elif 'sonos_zone_cmd' in item.conf:
-                plgitems.append(item)
+                self.plgitems.append(item)
             elif 'sonos_zone_info' in item.conf:
-                plgitems.append(item)
+                self.plgitems.append(item)
 
         # additionally hand over the list of items, sorted by item-path
         tmpl = self.tplenv.get_template('index.html')
-        return tmpl.render(p=self.plugin, items=sorted(plgitems, key=lambda k: str.lower(k['_path'])),)
+        return tmpl.render(p=self.plugin,
+                           webif_pagelength=self.plugin.webif_pagelength,
+                           items=sorted(self.plgitems, key=lambda k: str.lower(k['_path'])),
+                           item_count=len(self.plgitems))
 
     @cherrypy.expose
     def get_data_html(self, dataSet=None):
@@ -95,17 +99,17 @@ class WebInterface(SmartPluginWebIf):
         """
         if dataSet is None:
             # get the new data
-            data = {}
+            data = dict()
+            for item in self.plgitems:
+                data[item.id()] = {}
+                data[item.id()]['value'] = item()
+                data[item.id()]['last_update'] = item.property.last_update.strftime('%d.%m.%Y %H:%M:%S')
+                data[item.id()]['last_change'] = item.property.last_change.strftime('%d.%m.%Y %H:%M:%S')
 
-            # data['item'] = {}
-            # for i in self.plugin.items:
-            #     data['item'][i]['value'] = self.plugin.getitemvalue(i)
-            #
-            # return it as json the the web page
-            # try:
-            #     return json.dumps(data)
-            # except Exception as e:
-            #     self.logger.error("get_data_html exception: {}".format(e))
+            try:
+                return json.dumps(data)
+            except Exception as e:
+                self.logger.error(f"get_data_html exception: {e}")
         return {}
 
     @cherrypy.expose

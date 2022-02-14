@@ -88,6 +88,8 @@ class SonosHttp(SmartPlugin):
             else:
                 self.logger.error(f"Your chosen webservice port {_http_server_port} is already in use.")
 
+        self.webif_pagelength = self.get_parameter_value('webif_pagelength')
+
         # define properties
         self._item_dict = {}                        # dict to hold all items {item1: ('sonos_zone', 'sonos_cmd'), item2: ('sonos_zone', 'sonos_cmd')...}
         self.sonos = {}                             # dict to hold state information per zone

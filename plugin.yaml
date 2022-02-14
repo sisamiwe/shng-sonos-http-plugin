@@ -67,6 +67,18 @@ parameters:
             de: 'Sprachkürzel für TTS Service'
             en: 'Acronym for language setting of tts service'
 
+    webif_pagelength:
+        type: int
+        default: 100
+        valid_list:
+            - -1
+            - 25
+            - 50
+            - 100
+        description:
+            de: 'Anzahl an Items, die standardmäßig in einer Web Interface Tabelle pro Seite angezeigt werden'
+            en: 'Amount of items being listed in a web interface table per page by default'
+
 item_attributes:
     sonos_zone:
         type: str
