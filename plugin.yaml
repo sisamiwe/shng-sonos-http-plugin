@@ -3,8 +3,8 @@ plugin:
     # Global plugin attributes
     type: interface                 # plugin type (gateway, interface, protocol, system, web)
     description:
-        de: ''
-        en: ''
+        de: 'Anbindung von SONOS Lautsprechern über die SONOS HTTP API'
+        en: 'Connect SONOS Speaker via SONOS HTTP API'
     maintainer: sisamiwe
 #    tester:                         # Who tests this plugin?
     state: develop                   # change to ready when done with development
@@ -12,35 +12,50 @@ plugin:
 #    documentation: https://github.com/smarthomeNG/smarthome/wiki/CLI-Plugin        # url of documentation (wiki) page
 #    support: https://knx-user-forum.de/forum/supportforen/smarthome-py
 
-    version: 1.0.0                  # Plugin version (must match the version specified in __init__.py)
+    version: 1.0.1                  # Plugin version (must match the version specified in __init__.py)
     sh_minversion: 1.8              # minimum shNG version to use this plugin
 #    sh_maxversion:                 # maximum shNG version to use this plugin (leave empty if latest)
     py_minversion: 3.8              # minimum Python version to use for this plugin
 #    py_maxversion:                 # maximum Python version to use for this plugin (leave empty if latest)
     multi_instance: false           # plugin supports multi instance
-    restartable: unknown
+    restartable: true
     classname: SonosHttp            # class containing the plugin
 
 parameters:
 
-    Server_IP:
+    API_Server_IP:
         type: ipv4
         mandatory: false
         default: '0.0.0.0'
         description:
-            de: 'IP-Adresse des Servers'
-            en: 'IP-Address of the server'
+            de: 'IP-Adresse des Servers, auf dem die SONOS HTTP API läuft'
+            en: 'IP-Address of the server hosting the SONOS HTTP API'
 
-    Server_Port:
+    API_Server_Port:
         type: int
         mandatory: false
-        default: 1025
+        default: 5005
         description:
-            de: 'Port des Servers'
-            en: 'Port of the server'
+            de: 'Port des Servers, auf dem die SONOS HTTP API läuft'
+            en: 'Port of the server hosting the SONOS HTTP API'
+
+    WebHook_Server_Port:
+        type: int
+        mandatory: false
+        default: 5007
+        description:
+            de: 'Port des Servers, auf dem die WebHook Daten empfangen werden'
+            en: 'Port of the server receiving webhook data'
+
+    pause_item:
+        type: str
+        default: ''
+        description:
+            de: 'Item, um die Ausführung des Plugins zu steuern'
+            en: 'item for controlling plugin execution'
 
 item_attributes:
-    sonos_room:
+    sonos_zone:
         type: str
         description:
             de: ''
@@ -52,7 +67,60 @@ item_attributes:
             de: ''
             en: ''
 
-item_structs: NONE
+item_structs:
+    sonos_zone:
+        play:
+            type: bool
+            sonos_zone: ..:.
+            sonos_cmd: play
+
+        pause:
+            type: bool
+            sonos_zone: ..:.
+            sonos_cmd: pause
+
+        volume:
+            type: num
+            sonos_zone: ..:.
+            sonos_cmd: volume
+
+        mute:
+            type: bool
+            sonos_zone: ..:.
+            sonos_cmd: togglemute
+
+        bass:
+            type: num
+            sonos_zone: ..:.
+            sonos_cmd: bass
+
+        treble:
+            type: num
+            sonos_zone: ..:.
+            sonos_cmd: treble
+
+        loudness:
+            type: bool
+            sonos_zone: ..:.
+            sonos_cmd: loudness
+
+        say:
+            type: str
+            sonos_zone: ..:.
+            sonos_cmd: say
+
+    playbar:
+        nightmode:
+            type: bool
+            sonos_zone: ..:.
+            sonos_cmd: nightmode
+
+    sonos_system:
+        favorites:
+            type: list
+            sonos_cmd: favorites
+
+
 
 #item_attribute_prefixes:
     # Definition of item attributes that only have a common prefix (enter 'item_attribute_prefixes: NONE' or ommit this section, if section should be empty)

@@ -28,6 +28,7 @@
 import datetime
 import time
 import os
+import json
 
 from lib.item import Items
 from lib.model.smartplugin import SmartPluginWebIf
@@ -71,11 +72,12 @@ class WebInterface(SmartPluginWebIf):
         :return: contents of the template after beeing rendered
         """
         tmpl = self.tplenv.get_template('index.html')
+        pagelength = self.plugin.get_parameter_value('webif_pagelength')
         # add values to be passed to the Jinja2 template eg: tmpl.render(p=self.plugin, interface=interface, ...)
         return tmpl.render(p=self.plugin,
-                           items=sorted(self.items.return_items(), key=lambda k: str.lower(k['_path'])),
-                           item_count=0)
-
+                           webif_pagelength=pagelength,
+                           items=self.plugin.get_item_list(),
+                           item_count=len(self.plugin.get_item_list()))
 
     @cherrypy.expose
     def get_data_html(self, dataSet=None):
@@ -87,18 +89,29 @@ class WebInterface(SmartPluginWebIf):
         :param dataSet: Dataset for which the data should be returned (standard: None)
         :return: dict with the data needed to update the web page.
         """
+        # if dataSets are used, define them here
+        if dataSet == 'overview':
+            # get the new data from the plugin variable called _webdata
+            data = self.plugin._webdata
+            try:
+                data = json.dumps(data)
+                return data
+            except Exception as e:
+                self.logger.error(f"get_data_html overview exception: {e}")
+
+        elif dataSet == 'devices_info':
+            data = {'items': {}}
+
+            for item in self.plugin.get_item_list():
+                item_dict = {'value': item.property.value, 'last_update': item.property.last_update.strftime('%d.%m.%Y %H:%M:%S'),
+                             'last_change': item.property.last_change.strftime('%d.%m.%Y %H:%M:%S')}
+                data['items'][item.property.path] = item_dict
+                data['zones'] = dict(self.plugin.sonos)
+
+            try:
+                return json.dumps(data, default=str)
+            except Exception as e:
+                self.logger.error(f"get_data_html devices_info exception: {e}")
+
         if dataSet is None:
-            # get the new data
-            data = {}
-
-            # data['item'] = {}
-            # for i in self.plugin.items:
-            #     data['item'][i]['value'] = self.plugin.getitemvalue(i)
-            #
-            # return it as json the the web page
-            # try:
-            #     return json.dumps(data)
-            # except Exception as e:
-            #     self.logger.error("get_data_html exception: {}".format(e))
-        return {}
-
+            return

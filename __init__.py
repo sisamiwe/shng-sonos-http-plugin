@@ -85,14 +85,14 @@ cmds = ['play',
 
 class SonosHttp(SmartPlugin):
 
-    PLUGIN_VERSION = '1.0.0'
+    PLUGIN_VERSION = '1.0.1'
 
     def __init__(self, sh):
         """
-        Initalizes the plugin.
+        Initializes the plugin.
 
         If you need the sh object at all, use the method self.get_sh() to get it. There should be almost no need for
-        a reference to the sh object any more.
+        a reference to the sh object anymore.
 
         Plugins have to use the new way of getting parameter values:
         use the SmartPlugin method get_parameter_value(parameter_name). Anywhere within the Plugin you can get
@@ -103,22 +103,28 @@ class SonosHttp(SmartPlugin):
         # Call init code of parent class (SmartPlugin)
         super().__init__()
 
-        # get the parameters for the plugin (as defined in metadata plugin.yaml):
-        self._http_server_ip = self.get_parameter_value('Server_IP') if self.get_parameter_value('Server_IP') != '0.0.0.0' else Utils.get_local_ipv4_address()
-        self._http_server_port = self.get_parameter_value('Server_Port')
+        # get the parameters for the plugin
+        _own_ip = Utils.get_local_ipv4_address()
+        self._http_api_server_ip = self.get_parameter_value('API_Server_IP') if self.get_parameter_value('API_Server_IP') != '0.0.0.0' else _own_ip
+        self._http_api_server_port = self.get_parameter_value('API_Server_Port')
+        _webhook_server_port = self.get_parameter_value('WebHook_Server_Port')
+        self._pause_item_path = self.get_parameter_value('pause_item')
 
         # define properties
-        self._item_dict = {}                        # dict to hold all items {item1: ('sonos_room', 'sonos_cmd'), item2: ('sonos_room', 'sonos_cmd')...}
-        self.sonos = {}                             # dict to hold state information per room
+        self.sonos = {}                             # dict to hold state information per zone
         self.sonos_room_uuid = set()                # set of tuples for [(room1, uuid1), (room2, uuid2), ...]
         self.sonos_topology = {}                    # dict for topology {uuid1 {'coordinator': 'RINCON_', 'members': {'RINCON_7828CAEAC58601400'}}, uuid2....
         self.alive = None
         
-        # init HttpServer
-        self.client = HttpServer(self._http_server_ip, self._http_server_port, self)
-        
-        # start HttpServer
-        self.client.startup()
+        # init HttpServer for receiving webhook data
+        try:
+            self.client = HttpServer(_own_ip, _webhook_server_port, self)
+        except Exception as e:
+            self.logger.warning(f"Could not start HTTP Server in ip={_own_ip}, port={_webhook_server_port}; Exception {e} occurred.")
+            self.client = None
+        else:
+            # start HttpServer
+            self.client.startup()
 
         # check webinterface
         if not self.init_webinterface(WebInterface):
@@ -132,14 +138,16 @@ class SonosHttp(SmartPlugin):
         Run method for the plugin
         """
         self.logger.debug(f"{self.get_shortname()}: Run method called")
-        # setup scheduler for device poll loop   (disable the following line, if you don't need to poll the device. Rember to comment the self_cycle statement in __init__ as well)
-        # self.scheduler_add('poll_device', self.perform, cycle=self._cycle)
+
+        # let the plugin change the state of pause_item
+        if self._pause_item:
+            self._pause_item(False, self.get_fullname())
+
+        # set plugin to alive
         self.alive = True
 
         # read sonos config
-        response = self.get_request('zones')
-        self.logger.debug(f"run: response={response}")
-        self._decode_zones(response)
+        self._decode_zones(self.get_request('zones'))
 
         # finally run 'get_webhook_data' in an endless loop
         self.get_webhook_data()
@@ -149,10 +157,16 @@ class SonosHttp(SmartPlugin):
         Stop method for the plugin
         """
         self.logger.debug(f"{self.get_shortname()}: Stop method called")
-        # self.scheduler_remove('poll_device')
+
+        # let the plugin change the state of pause_item
+        if self._pause_item:
+            self._pause_item(True, self.get_fullname())
+
+        if self.client:
+            self.client.stop_server()
+            self.client.shutdown()
+
         self.alive = False
-        self.client.stop_server()
-        self.client.shutdown()
     
     def parse_item(self, item):
         """
@@ -167,24 +181,30 @@ class SonosHttp(SmartPlugin):
                         with the item, caller, source and dest as arguments and in case of the knx plugin the value
                         can be sent to the knx with a knx write function within the knx plugin.
         """
-        if self.has_iattr(item.conf, 'sonos_cmd'):
-            # self.logger.debug(f"parse item: {item}")
 
-            _sonos_cmd = str(self.get_iattr_value(item.conf, 'sonos_cmd'))
-            _sonos_room = None
+        def get_sonos_zone(item_level_up: int = 3, attribute: str = 'sonos_zone'):
+            _sonos_zone = None
             lookup_item = item
-            for i in range(3):
-                if self.has_iattr(lookup_item.conf, 'sonos_room'):
-                    _sonos_room = str(self.get_iattr_value(lookup_item.conf, 'sonos_room'))
-                    break
+            for i in range(item_level_up):
+                if self.has_iattr(lookup_item.conf, attribute):
+                    return self.get_iattr_value(lookup_item.conf, attribute)
                 else:
-                    # self.logger.debug(f"Attribut 'sonos_room' is not found at item={item} at lookup_item={lookup_item}not given")
                     lookup_item = lookup_item.return_parent()
 
-            if _sonos_room is not None:
-                self._itemlist.append(item)
-                # self.logger.debug(f"Item {item.id()} with sonos_cmd attribut and defined 'sonos_room' found; append to list")
-                self._item_dict[item] = (_sonos_room, _sonos_cmd)
+        # check for pause item
+        if item.property.path == self._pause_item_path:
+            self.logger.debug(f'pause item {item.property.path} registered')
+            self._pause_item = item
+            self.add_item(item, updating=True)
+            return self.update_item
+
+        if self.has_iattr(item.conf, 'sonos_cmd'):
+            sonos_cmd = self.get_iattr_value(item.conf, 'sonos_cmd')
+            sonos_zone = get_sonos_zone()
+
+            if sonos_zone:
+                self.logger.debug(f'{self.get_shortname()} {item.property.path} registered')
+                self.add_item(item, config_data_dict={'sonos_zone': sonos_zone, 'sonos_cmd': sonos_cmd})
                 return self.update_item
 
     def update_item(self, item, caller=None, source=None, dest=None):
@@ -200,137 +220,138 @@ class SonosHttp(SmartPlugin):
         :param source: if given it represents the source
         :param dest: if given it represents the dest
         """
+
+        # check for pause item
+        if item is self._pause_item and caller != self.get_shortname():
+            self.logger.debug(f'pause item changed to {item()}')
+            if item() and self.alive:
+                self.stop()
+            elif not item() and not self.alive:
+                self.run()
+            return
+
+
         if self.alive and caller != self.get_shortname():
-            # code to execute if the plugin is not stopped
-            # and only, if the item has not been changed by this this plugin:
             self.logger.info(f"Update item: {item.property.path}, item has been changed outside this plugin")
+            self.logger.debug(f"update_item was called with item {item.property.path} with value {item()} from caller {caller}, source {source} and dest {dest}")
 
-            if item in self._item_dict:
-                self.logger.debug(f"update_item was called with item {item.property.path} with value {item()} from caller {caller}, source {source} and dest {dest}")
+            item_config = self.get_item_config(item)
+            _sonos_zone = item_config['sonos_zone']
+            _sonos_cmd = item_config['sonos_cmd']
 
-                _sonos_room = self._item_dict[item][0]
-                _sonos_cmd = self._item_dict[item][1]
+            if _sonos_cmd in ['volume_up']:
+                request = f"{_sonos_zone}/volume/+1"
+            elif _sonos_cmd in ['volume_down']:
+                request = f"{_sonos_zone}/volume/-1"
+            elif _sonos_cmd in ['play', 'pause', 'playpause', 'mute', 'unmute', 'groupMute', 'groupUnmute', 'togglemute', 'next', 'previous', 'state']:
+                request = f"{_sonos_zone}/{_sonos_cmd}"
+            elif 'say' in _sonos_cmd:
+                request = f"{_sonos_zone}/{_sonos_cmd}/{urlparse.quote(item())}/de"
+            else:
+                request = f"{_sonos_zone}/{_sonos_cmd}/{item()}"
 
-                if _sonos_cmd in ['volume_up']:
-                    request = f"{_sonos_room}/volume/+1"
-                elif _sonos_cmd in ['volume_down']:
-                    request = f"{_sonos_room}/volume/-1"
-                elif _sonos_cmd in ['play', 'pause', 'playpause', 'mute', 'unmute', 'groupMute', 'groupUnmute', 'togglemute', 'next', 'previous', 'state']:
-                    request = f"{_sonos_room}/{_sonos_cmd}"
-                elif 'say' in _sonos_cmd:
-                    request = f"{_sonos_room}/{_sonos_cmd}/{urlparse.quote(item())}/de"
-                else:
-                    request = f"{_sonos_room}/{_sonos_cmd}/{item()}"
-
-                response = self.get_request(request)
-                self.logger.debug(f"update_item: response={response}")
+            response = self.get_request(request)
+            self.logger.debug(f"update_item: {response=}")
 
     def get_request(self, request):
 
-        self.logger.debug(f"get_request: request={request}")
-
-        protocol = 'http'
-        ip = self._http_server_ip
-        port = 5005
-        url_base = f"{protocol}://{ip}:{port}"
-
+        self.logger.debug(f"get_request: {request=}")
+        url_base = f"http://{self._http_api_server_ip}:{self._http_api_server_port}"
         request = f"{url_base}/{request}"
 
         try:
             r = requests.get(request, verify=False)
         except Exception as e:
-            self.logger.error(f"get_request: request={request} failed with Error {e}")
+            self.logger.error(f"get_request: {request=} failed with Error {e}")
         else:
             if r.status_code == requests.codes.ok:
-                # self.logger.error(f"get_request: request={request} sucessful")
+                # self.logger.error(f"get_request: request={request} successful")
                 response = json.loads(r.text)
                 # self.logger.error(f"json={response}")
                 # self.logger.debug(f"json={json.dumps(d, indent=4, sort_keys=True)}")
                 return response
             else:
-                self.logger.error(f"get_request: request={request} failed")
+                self.logger.error(f"get_request: {request=} failed")
                 return
 
     def get_webhook_data(self):
         while self.alive:
             try:
                 queue_data = self.client.get_queue().get(True, 10)
-                # self.logger.debug(f"get_webhook_data: queue_data={queue_data}")
-            except queue.Empty:
-                # self.logger.debug("get_webhook_data: there was nothing in the queue so continue")
-                # there was nothing in the queue so continue
-                pass
-            else:
+                self.logger.debug(f"get_webhook_data: queue_data={queue_data}")
+
                 response = json.loads(queue_data)
                 self.logger.debug(f"get_webhook_data: response={response}")
+            except queue.Empty:
+                # self.logger.debug("get_webhook_data: there was nothing in the queue so continue")
+                pass
+            except json.JSONDecodeError:
+                self.logger.warning(f"Could not decode {queue_data=}")
+                pass
+            else:
+                self.logger.debug(f"get_webhook_data: response={response}")
 
-                response_type = response['type']
-
-                if response_type == "transport-state":
+                if response['type'] == "transport-state":
                     # response={'type': 'transport-state', 'data': {'uuid': 'RINCON_7828CAEB625E01400', 'coordinator': 'RINCON_7828CAEB625E01400', 'roomName': 'Esszimmer', 'state': {'volume': 10, 'mute': False, 'equalizer': {'bass': 7, 'treble': 8, 'loudness': True}, 'currentTrack': {'artist': 'Antenne Bayern', 'albumArtUri': '/getaa?s=1&u=x-sonosapi-stream%3atop40%3fsid%3d269%26flags%3d32%26sn%3d8', 'duration': 0, 'uri': 'x-sonosapi-stream:top40?sid=269&flags=32&sn=8', 'trackUri': 'x-sonosapi-stream:top40?sid=269&flags=32&sn=8', 'type': 'radio', 'stationName': 'Antenne Bayern', 'absoluteAlbumArtUri': 'http://192.168.2.130:1400/getaa?s=1&u=x-sonosapi-stream%3atop40%3fsid%3d269%26flags%3d32%26sn%3d8'}, 'nextTrack': {'artist': '', 'title': '', 'album': '', 'albumArtUri': '', 'duration': 0, 'uri': ''}, 'trackNo': 1, 'elapsedTime': 0, 'elapsedTimeFormatted': '00:00:00', 'playbackState': 'STOPPED', 'playMode': {'repeat': 'none', 'shuffle': False, 'crossfade': False}}, 'groupState': {'volume': 10, 'mute': False}, 'avTransportUri': 'x-sonosapi-stream:top40?sid=269&flags=32&sn=8', 'avTransportUriMetadata': '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"><item id="-1" parentID="-1" restricted="true"><dc:title>Antenne Bayern</dc:title><upnp:class>object.item.audioItem.audioBroadcast</upnp:class><desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">SA_RINCON68871_</desc></item></DIDL-Lite>'}}
                     self._decode_state(response['data'])
 
-                elif response_type == "topology-change":
+                elif response['type'] == "topology-change":
                     # response={'type': 'topology-change', 'data': [{'coordinator': {'uuid': 'RINCON_7828CA59548701400', 'coordinator': 'RINCON_7828CA59548701400', 'roomName': 'TV', 'state': {'volume': 10, 'mute': False, 'equalizer': {'bass': 7, 'treble': 6, 'loudness': True, 'speechEnhancement': True, 'nightMode': False}, 'currentTrack': {'title': 'google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3', 'duration': 2, 'uri': 'http://192.168.2.12:5005/tts/google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3', 'trackUri': 'http://192.168.2.12:5005/tts/google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3', 'type': 'track', 'stationName': '', 'absoluteAlbumArtUri': 'http://192.168.2.12:5005/tts/google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3'}, 'nextTrack': {'artist': '', 'title': '', 'album': '', 'albumArtUri': '', 'duration': 0, 'uri': ''}, 'trackNo': 1, 'elapsedTime': 0, 'elapsedTimeFormatted': '00:00:00', 'playbackState': 'STOPPED', 'playMode': {'repeat': 'none', 'shuffle': False, 'crossfade': False}, 'sub': {'gain': 7, 'crossover': 0, 'polarity': 0, 'enabled': True}}, 'groupState': {'volume': 10, 'mute': False}, 'avTransportUri': 'http://192.168.2.12:5005/tts/google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3', 'avTransportUriMetadata': ''}, 'members': [{'uuid': 'RINCON_7828CA59548701400', 'coordinator': 'RINCON_7828CA59548701400', 'roomName': 'TV', 'state': {'volume': 10, 'mute': False, 'equalizer': {'bass': 7, 'treble': 6, 'loudness': True, 'speechEnhancement': True, 'nightMode': False}, 'currentTrack': {'title': 'google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3', 'duration': 2, 'uri': 'http://192.168.2.12:5005/tts/google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3', 'trackUri': 'http://192.168.2.12:5005/tts/google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3', 'type': 'track', 'stationName': '', 'absoluteAlbumArtUri': 'http://192.168.2.12:5005/tts/google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3'}, 'nextTrack': {'artist': '', 'title': '', 'album': '', 'albumArtUri': '', 'duration': 0, 'uri': ''}, 'trackNo': 1, 'elapsedTime': 0, 'elapsedTimeFormatted': '00:00:00', 'playbackState': 'STOPPED', 'playMode': {'repeat': 'none', 'shuffle': False, 'crossfade': False}, 'sub': {'gain': 7, 'crossover': 0, 'polarity': 0, 'enabled': True}}, 'groupState': {'volume': 10, 'mute': False}, 'avTransportUri': 'http://192.168.2.12:5005/tts/google-808092f232a9736dfa6447c6e12bfa4f27a74993-de.mp3', 'avTransportUriMetadata': ''}], 'uuid': 'RINCON_7828CA59548701400', 'id': 'RINCON_7828CAEB625E01400:1640192871'}, {'coordinator': {'uuid': 'RINCON_7828CAEAC58601400', 'coordinator': 'RINCON_7828CAEAC58601400', 'roomName': 'Büronos', 'state': {'volume': 10, 'mute': False, 'equalizer': {'bass': 7, 'treble': 3, 'loudness': True}, 'currentTrack': {'artist': 'BR Schlager', 'title': 'BR Schlager', 'albumArtUri': '/getaa?s=1&u=x-sonosapi-stream%3atunein%253a15544%3fsid%3d303%26flags%3d8224%26sn%3d9', 'duration': 0, 'uri': 'x-sonosapi-stream:tunein%3a15544?sid=303&flags=8224&sn=9', 'trackUri': 'x-sonosapi-stream:tunein%3a15544?sid=303&flags=8224&sn=9', 'type': 'radio', 'stationName': 'BR Schlager', 'absoluteAlbumArtUri': 'http://192.168.2.123:1400/getaa?s=1&u=x-sonosapi-stream%3atunein%253a15544%3fsid%3d303%26flags%3d8224%26sn%3d9'}, 'nextTrack': {'artist': '', 'title': '', 'album': '', 'albumArtUri': '', 'duration': 0, 'uri': ''}, 'trackNo': 1, 'elapsedTime': 0, 'elapsedTimeFormatted': '00:00:00', 'playbackState': 'STOPPED', 'playMode': {'repeat': 'none', 'shuffle': False, 'crossfade': False}}, 'groupState': {'volume': 10, 'mute': False}, 'avTransportUri': 'x-sonosapi-stream:tunein%3a15544?sid=303&flags=8224&sn=9', 'avTransportUriMetadata': '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"><item id="-1" parentID="-1" restricted="true"><dc:title>BR Schlager</dc:title><upnp:class>object.item.audioItem.audioBroadcast</upnp:class><desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">SA_RINCON77575_X_#Svc77575-644c3615-Token</desc></item></DIDL-Lite>'}, 'members': [{'uuid': 'RINCON_7828CAEAC58601400', 'coordinator': 'RINCON_7828CAEAC58601400', 'roomName': 'Büronos', 'state': {'volume': 10, 'mute': False, 'equalizer': {'bass': 7, 'treble': 3, 'loudness': True}, 'currentTrack': {'artist': 'BR Schlager', 'title': 'BR Schlager', 'albumArtUri': '/getaa?s=1&u=x-sonosapi-stream%3atunein%253a15544%3fsid%3d303%26flags%3d8224%26sn%3d9', 'duration': 0, 'uri': 'x-sonosapi-stream:tunein%3a15544?sid=303&flags=8224&sn=9', 'trackUri': 'x-sonosapi-stream:tunein%3a15544?sid=303&flags=8224&sn=9', 'type': 'radio', 'stationName': 'BR Schlager', 'absoluteAlbumArtUri': 'http://192.168.2.123:1400/getaa?s=1&u=x-sonosapi-stream%3atunein%253a15544%3fsid%3d303%26flags%3d8224%26sn%3d9'}, 'nextTrack': {'artist': '', 'title': '', 'album': '', 'albumArtUri': '', 'duration': 0, 'uri': ''}, 'trackNo': 1, 'elapsedTime': 0, 'elapsedTimeFormatted': '00:00:00', 'playbackState': 'STOPPED', 'playMode': {'repeat': 'none', 'shuffle': False, 'crossfade': False}}, 'groupState': {'volume': 10, 'mute': False}, 'avTransportUri': 'x-sonosapi-stream:tunein%3a15544?sid=303&flags=8224&sn=9', 'avTransportUriMetadata': '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"><item id="-1" parentID="-1" restricted="true"><dc:title>BR Schlager</dc:title><upnp:class>object.item.audioItem.audioBroadcast</upnp:class><desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">SA_RINCON77575_X_#Svc77575-644c3615-Token</desc></item></DIDL-Lite>'}], 'uuid': 'RINCON_7828CAEAC58601400', 'id': 'RINCON_7828CAEAC58601400:3457120174'}, {'coordinator': {'uuid': 'RINCON_7828CA060F5401400', 'coordinator': 'RINCON_7828CA060F5401400', 'roomName': 'Carlisonos', 'state': {'volume': 10, 'mute': False, 'equalizer': {'bass': 4, 'treble': 4, 'loudness': True}, 'currentTrack': {'title': 'google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3', 'duration': 2, 'uri': 'http://192.168.2.12:5005/tts/google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3', 'trackUri': 'http://192.168.2.12:5005/tts/google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3', 'type': 'track', 'stationName': '', 'absoluteAlbumArtUri': 'http://192.168.2.12:5005/tts/google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3'}, 'nextTrack': {'artist': '', 'title': '', 'album': '', 'albumArtUri': '', 'duration': 0, 'uri': ''}, 'trackNo': 1, 'elapsedTime': 0, 'elapsedTimeFormatted': '00:00:00', 'playbackState': 'STOPPED', 'playMode': {'repeat': 'none', 'shuffle': False, 'crossfade': False}}, 'groupState': {'volume': 10, 'mute': False}, 'avTransportUri': 'http://192.168.2.12:5005/tts/google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3', 'avTransportUriMetadata': ''}, 'members': [{'uuid': 'RINCON_7828CA060F5401400', 'coordinator': 'RINCON_7828CA060F5401400', 'roomName': 'Carlisonos', 'state': {'volume': 10, 'mute': False, 'equalizer': {'bass': 4, 'treble': 4, 'loudness': True}, 'currentTrack': {'title': 'google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3', 'duration': 2, 'uri': 'http://192.168.2.12:5005/tts/google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3', 'trackUri': 'http://192.168.2.12:5005/tts/google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3', 'type': 'track', 'stationName': '', 'absoluteAlbumArtUri': 'http://192.168.2.12:5005/tts/google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3'}, 'nextTrack': {'artist': '', 'title': '', 'album': '', 'albumArtUri': '', 'duration': 0, 'uri': ''}, 'trackNo': 1, 'elapsedTime': 0, 'elapsedTimeFormatted': '00:00:00', 'playbackState': 'STOPPED', 'playMode': {'repeat': 'none', 'shuffle': False, 'crossfade': False}}, 'groupState': {'volume': 10, 'mute': False}, 'avTransportUri': 'http://192.168.2.12:5005/tts/google-d49ec1435dbe5f9d4e1fc04a3cab8e61749d85be-de.mp3', 'avTransportUriMetadata': ''}], 'uuid': 'RINCON_7828CA060F5401400', 'id': 'RINCON_7828CA060F5401400:2557459617'}, {'coordinator': {'uuid': 'RINCON_7828CAEB625E01400', 'coordinator': 'RINCON_7828CAEB625E01400', 'roomName': 'Esszimmer', 'state': {'volume': 10, 'mute': False, 'equalizer': {'bass': 7, 'treble': 8, 'loudness': True}, 'currentTrack': {'artist': 'Antenne Bayern', 'title': 'ZPSTR_BUFFERING', 'albumArtUri': '/getaa?s=1&u=x-sonosapi-stream%3atop40%3fsid%3d269%26flags%3d32%26sn%3d8', 'duration': 0, 'uri': 'x-sonosapi-stream:top40?sid=269&flags=32&sn=8', 'trackUri': 'x-sonosapi-stream:top40?sid=269&flags=32&sn=8', 'type': 'radio', 'stationName': 'Antenne Bayern', 'absoluteAlbumArtUri': 'http://192.168.2.130:1400/getaa?s=1&u=x-sonosapi-stream%3atop40%3fsid%3d269%26flags%3d32%26sn%3d8'}, 'nextTrack': {'artist': '', 'title': '', 'album': '', 'albumArtUri': '', 'duration': 0, 'uri': ''}, 'trackNo': 1, 'elapsedTime': 0, 'elapsedTimeFormatted': '00:00:00', 'playbackState': 'TRANSITIONING', 'playMode': {'repeat': 'none', 'shuffle': False, 'crossfade': False}}, 'groupState': {'volume': 10, 'mute': False}, 'avTransportUri': 'x-sonosapi-stream:top40?sid=269&flags=32&sn=8', 'avTransportUriMetadata': '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"><item id="-1" parentID="-1" restricted="true"><dc:title>Antenne Bayern</dc:title><upnp:class>object.item.audioItem.audioBroadcast</upnp:class><desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">SA_RINCON68871_</desc></item></DIDL-Lite>'}, 'members': [{'uuid': 'RINCON_7828CAEB625E01400', 'coordinator': 'RINCON_7828CAEB625E01400', 'roomName': 'Esszimmer', 'state': {'volume': 10, 'mute': False, 'equalizer': {'bass': 7, 'treble': 8, 'loudness': True}, 'currentTrack': {'artist': 'Antenne Bayern', 'title': 'ZPSTR_BUFFERING', 'albumArtUri': '/getaa?s=1&u=x-sonosapi-stream%3atop40%3fsid%3d269%26flags%3d32%26sn%3d8', 'duration': 0, 'uri': 'x-sonosapi-stream:top40?sid=269&flags=32&sn=8', 'trackUri': 'x-sonosapi-stream:top40?sid=269&flags=32&sn=8', 'type': 'radio', 'stationName': 'Antenne Bayern', 'absoluteAlbumArtUri': 'http://192.168.2.130:1400/getaa?s=1&u=x-sonosapi-stream%3atop40%3fsid%3d269%26flags%3d32%26sn%3d8'}, 'nextTrack': {'artist': '', 'title': '', 'album': '', 'albumArtUri': '', 'duration': 0, 'uri': ''}, 'trackNo': 1, 'elapsedTime': 0, 'elapsedTimeFormatted': '00:00:00', 'playbackState': 'TRANSITIONING', 'playMode': {'repeat': 'none', 'shuffle': False, 'crossfade': False}}, 'groupState': {'volume': 10, 'mute': False}, 'avTransportUri': 'x-sonosapi-stream:top40?sid=269&flags=32&sn=8', 'avTransportUriMetadata': '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"><item id="-1" parentID="-1" restricted="true"><dc:title>Antenne Bayern</dc:title><upnp:class>object.item.audioItem.audioBroadcast</upnp:class><desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">SA_RINCON68871_</desc></item></DIDL-Lite>'}], 'uuid': 'RINCON_7828CAEB625E01400', 'id': 'RINCON_7828CAEB625E01400:1640192896'}]}
                     self._decode_zones(response['data'])
 
-                elif response_type == "volume-change":
+                elif response['type'] == "volume-change":
                     # response={'type': 'volume-change', 'data': {'uuid': 'RINCON_7828CAEB625E01400', 'previousVolume': 8, 'newVolume': 8, 'roomName': 'Esszimmer'}}
                     data = response['data']
-                    roomname = data.get('roomName', None)
+                    room = data.get('roomName', None)
                     volume = int(data.get('newVolume', None))
-                    self.update_item_value_change(roomname, 'volume', volume)
+                    self.update_item_value_change(room, 'volume', volume)
 
-                elif response_type == "mute-change":
+                elif response['type'] == "mute-change":
                     # response={'type': 'mute-change', 'data': {'uuid': 'RINCON_7828CAEB625E01400', 'previousMute': True, 'newMute': True, 'roomName': 'Esszimmer'}}
                     data = response['data']
-                    roomname = data.get('roomName', None)
+                    room = data.get('roomName', None)
                     mute = bool(data.get('newMute', None))
-                    self.update_item_value_change(roomname, 'mute', mute)
+                    self.update_item_value_change(room, 'mute', mute)
 
-    def update_item_value_change(self, device, cmd, value):
-        for item in self._item_dict:
-            _sonos_room = self._item_dict[item][0]
-            _sonos_cmd = self._item_dict[item][1]
+    def update_item_value_change(self, zone, cmd, value):
+        for item in self._get_item_list_for_zone_and_cmd(zone, cmd):
+            item(value, self.get_shortname())
 
-            if _sonos_room == device and _sonos_cmd == cmd:
-                item(value, self.get_shortname())
+    def update_item_value_state(self, zone):
 
-    def update_item_value_state(self, device):
-        for item in self._item_dict:
-            _sonos_room = self._item_dict[item][0]
-            _sonos_cmd = self._item_dict[item][1]
+        for item in self._get_item_list_for_zone(zone):
+            _sonos_cmd = self.get_item_config(item)['sonos_cmd']
             _value = None
 
-            if _sonos_room == device:
-                sonos_room_data = self.sonos.get(_sonos_room, None)
-                if sonos_room_data:
-                    sonos_room_data_state = sonos_room_data.get('state', None)
-                    if sonos_room_data_state:
-                        if _sonos_cmd.startswith('current_'):
-                            current_track = sonos_room_data_state.get('currentTrack', None)
-                            if current_track:
-                                cmd = _sonos_cmd.split('_')[1]
-                                try:
-                                    _value = current_track[cmd]
-                                except:
-                                    pass
-                        elif _sonos_cmd.startswith('next_'):
-                            next_track = sonos_room_data_state.get('nextTrack', None)
-                            if next_track:
-                                cmd = _sonos_cmd.split('_')[1]
-                                try:
-                                    _value = next_track[cmd]
-                                except:
-                                    pass
-                        elif _sonos_cmd in ['play', 'playpause']:
-                            playback_state = sonos_room_data_state.get('playbackState', None)
-                            if playback_state == 'STOPPED':
-                                _value = False
-                            else:
-                                _value = True
+            sonos_room_data = self.sonos.get(zone)
+
+            if sonos_room_data:
+                sonos_room_data_state = sonos_room_data.get('state')
+                if sonos_room_data_state:
+                    if _sonos_cmd.startswith('current_'):
+                        current_track = sonos_room_data_state.get('currentTrack')
+                        if current_track:
+                            cmd = _sonos_cmd.split('_')[1]
+                            try:
+                                _value = current_track[cmd]
+                            except:
+                                pass
+                    elif _sonos_cmd.startswith('next_'):
+                        next_track = sonos_room_data_state.get('nextTrack')
+                        if next_track:
+                            cmd = _sonos_cmd.split('_')[1]
+                            try:
+                                _value = next_track[cmd]
+                            except:
+                                pass
+                    elif _sonos_cmd in ['play', 'playpause']:
+                        playback_state = sonos_room_data_state.get('playbackState')
+                        if playback_state == 'STOPPED':
+                            _value = False
                         else:
-                            _value = self._recursive_lookup(_sonos_cmd, sonos_room_data)
+                            _value = True
+                    else:
+                        _value = self._recursive_lookup(_sonos_cmd, sonos_room_data)
                 if _value is not None:
                     item(_value, self.get_shortname())
 
@@ -343,18 +364,11 @@ class SonosHttp(SmartPlugin):
                 if a is not None: return a
         return None
 
-    def _get_uuid_from_room(self, room):
-        # list of tuples for [(room1, uuid1), (room2, uuid2), ...]
-
-        for index, data in enumerate(self.sonos_room_uuid):
-            device = data[0]
-            uuid = data[1]
-            # if room == device:
-                # return uuid
-
-        return dict(self.sonos_room_uuid).get(room, None)
-
     def _decode_zones(self, zones):
+
+        if not zones:
+            return
+
         # get all rooms and uuids
         for entry in zones:
             members = entry['members']
@@ -376,18 +390,26 @@ class SonosHttp(SmartPlugin):
 
     def _decode_state(self, data):
 
-        roomname = data.get('roomName', None)
+        room = data.get('roomName', None)
 
-        if roomname not in self.sonos:
-            self.sonos[roomname] = {}
+        if room not in self.sonos:
+            self.sonos[room] = {}
 
-        self.sonos[roomname]['uuid'] = data.get('uuid', None)
-        self.sonos[roomname]['coordinator'] = data.get('coordinator', None)
-        self.sonos[roomname]['state'] = data.get('state', None)
-        self.sonos[roomname]['groupstate'] = data.get('groupState', None)
+        self.sonos[room]['uuid'] = data.get('uuid', None)
+        self.sonos[room]['coordinator'] = data.get('coordinator', None)
+        self.sonos[room]['state'] = data.get('state', None)
+        self.sonos[room]['groupstate'] = data.get('groupState', None)
 
-        self.update_item_value_state(roomname)
+        self.update_item_value_state(room)
 
+    def _get_item_list_for_zone_and_cmd(self, zone: str, cmd: str):
+        return list(set(self._get_item_list_for_zone(zone)) - set(self._get_item_list_for_cmd(cmd)))
+
+    def _get_item_list_for_zone(self, zone):
+        return self.get_item_list('sonos_zone', zone)
+
+    def _get_item_list_for_cmd(self, cmd):
+        return self.get_item_list('sonos_cmd', cmd)
 
 class Consumer(object):
     """The Consumer contains two primary parts - a Server and a Parser."""
@@ -413,7 +435,7 @@ class Consumer(object):
 
 
 class HttpServer(Consumer):
-    """Use the ecowitt protocol (not WU protocol) to capture data"""
+    """HTTP Server to receive webhook data"""
 
     def __init__(self, tcp_server_address, tcp_server_port, plugin_instance):
 
