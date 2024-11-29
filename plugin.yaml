@@ -79,12 +79,27 @@ item_structs:
             sonos_zone: ..:.
             sonos_cmd: pause
 
+        playpause:
+            type: bool
+            sonos_zone: ..:.
+            sonos_cmd: playpause
+
         volume:
             type: num
             sonos_zone: ..:.
             sonos_cmd: volume
 
         mute:
+            type: bool
+            sonos_zone: ..:.
+            sonos_cmd: mute
+
+        unmute:
+            type: bool
+            sonos_zone: ..:.
+            sonos_cmd: unmute
+
+        mutetoggle:
             type: bool
             sonos_zone: ..:.
             sonos_cmd: togglemute
@@ -109,6 +124,12 @@ item_structs:
             sonos_zone: ..:.
             sonos_cmd: say
 
+        sleep:
+            remark: speaker timeout in seconds
+            type: num
+            sonos_zone: ..:.
+            sonos_cmd: sleep
+
     playbar:
         nightmode:
             type: bool
@@ -120,6 +141,37 @@ item_structs:
             type: list
             sonos_cmd: favorites
 
+        zones:
+            type: list
+            sonos_cmd: zones
+
+        lock_volumes:
+            type: bool
+            sonos_cmd: lockvolumes
+
+        unlock_volumes:
+            type: bool
+            sonos_cmd: unlockvolumes
+
+        pause_all:
+            remark: pauses all speaker for x minutes
+            type: num
+            sonos_cmd: pauseall
+
+        resume_all:
+            remark: resumes all speaker for x minutes
+            type: num
+            sonos_cmd: resumeall
+        
+        reindex:
+            remark: reindex sonos system
+            type: bool
+            sonos_cmd: reindex
+
+        preset:
+            remark: predefined preset name
+            type: str
+            sonos_cmd: preset
 
 
 #item_attribute_prefixes:
